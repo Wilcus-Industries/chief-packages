@@ -30,6 +30,16 @@ absence is the completion signal.
 
 ## Packages
 
+- **apple-findmy** — Locate Apple devices and AirTags by driving FindMy.app with UI automation (peekaboo + AppleScript).
+- **apple-notes** — Manage Apple Notes via the memo CLI — create, search, edit, export.
+- **apple-reminders** — Apple Reminders via the remindctl CLI — add, list, complete, with due-vs-alarm handling.
+- **claude-code** — Delegate coding tasks on other projects to the Claude Code CLI in one-shot print mode.
+- **duckduckgo-search** — Free web search (text/news) via the ddgs CLI — no API key.
+- **maps** — Geocoding, nearby places, routes, and timezones via OpenStreetMap/OSRM — keyless, stdlib-only.
+- **ocr-and-documents** — Extract text from PDFs, DOCX, and EPUBs (pymupdf, python-docx) — chief's only way to read documents.
+- **skill-maker** — How chief authors its own skills and packages — structure, validators, and writing-quality rules for crystallizing a workflow into a SKILL.md.
+- **whisper** — Local speech-to-text with whisper.cpp — transcribe voice memos and audio/video files the owner sends.
+- **youtube-content** — Fetch YouTube transcripts and turn them into summaries, chapters, or quotes.
 - **memory** — a discipline over the agent's own file + git tools: a durable
   note store under `data/memory/` with a `MEMORY.md` index the agent recalls
   from each session.
