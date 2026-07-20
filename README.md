@@ -46,3 +46,7 @@ absence is the completion signal.
 - **soul** — gives the agent a `Soul.md` character file inlined at the top of
   its system prompt every turn. Depends on `memory` (they share the
   `data/memory/` store and its git history).
+- **user** — gives the agent a `User.md` of standing facts about its owner
+  (name, age, work, household), added to its prompt every turn by a `pre_turn`
+  hook. For facts too always-relevant to need recall; everything recallable
+  stays in `memory`. Depends on `memory` (same store, same git history).

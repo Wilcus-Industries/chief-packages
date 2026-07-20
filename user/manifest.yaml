@@ -1,0 +1,12 @@
+name: user
+description: Standing facts about the owner — a User.md added to the agent's prompt every turn.
+dependencies:
+  - memory
+mcp_servers: {}
+skills:
+  - skills/user
+config_keys: []
+secrets: []
+hooks:
+  module: hooks.py
+  register: register
