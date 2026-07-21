@@ -1,0 +1,54 @@
+# chief-packages is a directory-of-packages repo, not a Python distribution:
+# each package is document-driven (manifest.yaml + INSTALL.md + skills). This
+# pyproject exists only to give the repo a test toolchain (pytest/ruff/mypy) so
+# the manifests can be checked against chief core's real MCP-manifest loader.
+[project]
+name = "chief-packages"
+version = "0.0.0"
+description = "Capability packages for the chief agent daemon (docs-driven, not a dist)."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.4",
+    "pyyaml>=6",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.uv]
+# Not an installable package — just a test harness over the manifests.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Surface skip reasons in default output — the real-loader tests skip *loudly*
+# only when no core checkout is reachable, and that reason must be visible.
+addopts = "-ra"
+# Guardrail: these are pure static/loader checks; a hung test fails fast.
+timeout = 30
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# mypy is scoped to tests/ only — the package dirs are docs plus sandbox-run
+# scripts (they import chief-internal and third-party deps not installed here),
+# so type-checking them would be meaningless. `mypy .` still discovers them, so
+# exclude everything outside tests/ from the recursive walk.
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["tests"]
+exclude = ['^(?!tests/).+\.py$']
+
+# core's mcp_manifest is imported at runtime via sys.path (see tests/conftest);
+# mypy can't see it, and pyyaml ships no inline stubs for the bare `yaml` name.
+[[tool.mypy.overrides]]
+module = ["chief", "chief.*", "yaml"]
+ignore_missing_imports = true
