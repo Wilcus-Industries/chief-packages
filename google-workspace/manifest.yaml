@@ -1,0 +1,16 @@
+name: google-workspace
+description: Gmail, Calendar, and Drive via a pinned Google Workspace MCP server (per-account, gated writes).
+dependencies:
+  - screening
+mcp_servers:
+  google-workspace:
+    command:
+      - uvx
+      - workspace-mcp
+skills:
+  - skills/google-workspace
+config_keys:
+  - google_workspace
+secrets:
+  - google_workspace_credentials
+python_deps: []
