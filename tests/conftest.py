@@ -23,24 +23,63 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _has_loader(cand: Path) -> bool:
+    return (cand / "src" / "chief" / "mcp_manifest.py").is_file()
+
+
 def _core_candidates() -> list[Path]:
-    """Where a chief core checkout might live, most-specific first."""
-    candidates: list[Path] = []
-    env = os.environ.get("CHIEF_CORE")
-    if env:
-        candidates.append(Path(env).expanduser())
-    candidates.append(Path.home() / "code" / "chief")
-    candidates.append(Path.home() / "chief-gf")
-    # repo-relative sibling checkout (…/chief next to …/chief-packages)
-    candidates.append(repo_root().parent / "chief")
-    return candidates
+    """Where a chief core checkout might live, most-specific first.
+
+    A set ``$CHIEF_CORE`` is authoritative: if it points at something without
+    the loader module we do NOT fall through to the defaults (a typo'd pin
+    would otherwise validate against a *different* core with no signal), so it
+    is intentionally omitted here — ``_resolve_core`` handles it up front.
+    """
+    return [
+        Path.home() / "code" / "chief",
+        Path.home() / "chief-gf",
+        # repo-relative sibling checkout (…/chief next to …/chief-packages)
+        repo_root().parent / "chief",
+    ]
+
+
+def _truthy(val: str | None) -> bool:
+    return val is not None and val.strip().lower() not in {"", "0", "false", "no"}
 
 
 def _resolve_core() -> Path | None:
-    """First candidate that actually contains the loader module wins."""
+    """First candidate that actually contains the loader module wins.
+
+    Fails loud in two cases the reviewer flagged:
+    - ``$CHIEF_CORE`` set but invalid → the pin is authoritative, so a bad
+      path is an error (never a silent fall-through to the defaults).
+    - ``$CHIEF_CORE_REQUIRED`` truthy but nothing resolves → the real-loader
+      tests would otherwise skip while the suite stays green; refuse instead.
+    """
+    env = os.environ.get("CHIEF_CORE")
+    if env:
+        pinned = Path(env).expanduser()
+        if _has_loader(pinned):
+            return pinned
+        pytest.exit(
+            f"$CHIEF_CORE={env!r} does not contain src/chief/mcp_manifest.py "
+            "(expected a chief core checkout) — fix or unset the pin; "
+            "not falling through to the default candidates",
+            returncode=1,
+        )
+
     for cand in _core_candidates():
-        if (cand / "src" / "chief" / "mcp_manifest.py").is_file():
+        if _has_loader(cand):
             return cand
+
+    if _truthy(os.environ.get("CHIEF_CORE_REQUIRED")):
+        searched = ", ".join(str(c) for c in _core_candidates())
+        pytest.exit(
+            "CHIEF_CORE_REQUIRED is set but no chief core checkout was found "
+            f"(searched: {searched}) — the real-loader tests would skip; set "
+            "$CHIEF_CORE to a checkout or unset CHIEF_CORE_REQUIRED",
+            returncode=1,
+        )
     return None
 
 

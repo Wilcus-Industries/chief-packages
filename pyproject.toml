@@ -24,6 +24,9 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Surface skip reasons in default output — the real-loader tests skip *loudly*
+# only when no core checkout is reachable, and that reason must be visible.
+addopts = "-ra"
 # Guardrail: these are pure static/loader checks; a hung test fails fast.
 timeout = 30
 
