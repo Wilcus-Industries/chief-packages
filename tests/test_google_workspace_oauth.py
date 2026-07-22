@@ -38,6 +38,7 @@ from oauth_consent import (
     CORE_SCOPES,
     ClientConfigError,
     CredentialStoreError,
+    ExpiredConsentError,
     IdentityMismatchError,
     OAuthClient,
     RedirectParseError,
@@ -51,6 +52,7 @@ from oauth_consent import (
     extract_auth_code,
     extract_state,
     load_credential,
+    pending_state_path,
     store_credential,
 )
 
@@ -144,16 +146,22 @@ def test_build_consent_url_generates_random_state_and_challenge(
     tmp_path: Path,
 ) -> None:
     """With no explicit state, each call issues a fresh random state + a PKCE
-    challenge derived (S256) from a fresh verifier."""
+    challenge derived (S256) from a fresh verifier.
+
+    Two calls for the SAME account must still differ — a deterministic
+    ``state = f(account)`` impl would pass a cross-account comparison but is
+    caught here (#16.4)."""
     import hashlib
 
     u1 = build_consent_url(CLIENT, "a@company.com", credentials_dir=tmp_path)
-    u2 = build_consent_url(CLIENT, "b@company.com", credentials_dir=tmp_path)
+    # Read the verifier persisted at u1's time before u2 overwrites the pending
+    # file (same account -> same path).
+    pending = json.loads((tmp_path / ".a@company.com.pending.json").read_text())
+    u2 = build_consent_url(CLIENT, "a@company.com", credentials_dir=tmp_path)
     s1, s2 = _state_from_url(u1), _state_from_url(u2)
     assert s1 and s2 and s1 != s2
 
     # The challenge equals base64url(sha256(verifier)) of the persisted verifier.
-    pending = json.loads((tmp_path / ".a@company.com.pending.json").read_text())
     verifier = pending["code_verifier"]
     expected = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -419,6 +427,45 @@ def test_consume_pending_state_rejects_when_no_pending(tmp_path: Path) -> None:
         consume_pending_state(
             "me@company.com", "anything", credentials_dir=tmp_path / "google_tokens"
         )
+
+
+def test_consume_pending_state_non_ascii_paste_fails_closed(tmp_path: Path) -> None:
+    """A pasted state that decodes to non-ASCII must fail closed cleanly, not
+    escape as a TypeError from ``hmac.compare_digest`` on str (#16.1)."""
+    creds = tmp_path / "google_tokens"
+    build_consent_url(CLIENT, "me@company.com", credentials_dir=creds, state="right")
+    with pytest.raises(StateMismatchError):
+        consume_pending_state("me@company.com", "café", credentials_dir=creds)
+
+
+def test_consume_pending_state_refuses_stale_session(tmp_path: Path) -> None:
+    """A pending session older than the TTL is refused (#16.3)."""
+    creds = tmp_path / "google_tokens"
+    build_consent_url(
+        CLIENT, "me@company.com", credentials_dir=creds, state="right"
+    )
+    path = pending_state_path("me@company.com", creds)
+    data = json.loads(path.read_text())
+    stale = datetime.now(UTC) - (oc._PENDING_STATE_TTL * 2)
+    data["issued_at"] = stale.isoformat()
+    path.write_text(json.dumps(data))
+    with pytest.raises(ExpiredConsentError):
+        consume_pending_state("me@company.com", "right", credentials_dir=creds)
+
+
+def test_consume_pending_state_refuses_missing_issue_time(tmp_path: Path) -> None:
+    """A pending session with no ``issued_at`` (stripped/old-format) fails closed
+    rather than being exchangeable indefinitely (#16.3)."""
+    creds = tmp_path / "google_tokens"
+    build_consent_url(
+        CLIENT, "me@company.com", credentials_dir=creds, state="right"
+    )
+    path = pending_state_path("me@company.com", creds)
+    data = json.loads(path.read_text())
+    del data["issued_at"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ExpiredConsentError):
+        consume_pending_state("me@company.com", "right", credentials_dir=creds)
 
 
 # --- Per-account credential storage -------------------------------------------
