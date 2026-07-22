@@ -86,6 +86,45 @@ def test_comments_and_blanks_ignored() -> None:
     assert af.entries == {"work": "me@company.com"}
 
 
+def test_constructor_rejects_strip_collision() -> None:
+    """Two names that strip to the same key are a duplicate, not last-wins —
+    unreachable via ``parse`` but the constructor is public API (#12.1)."""
+    with pytest.raises(AliasFileError):
+        AliasFile({"work": "a@x.com", " work ": "b@y.com"})
+
+
+def test_constructor_rejects_round_trip_breaking_names() -> None:
+    """Names that would serialize to a comment or mis-parse are refused, so
+    ``parse(x.serialize())`` always round-trips (#12.2)."""
+    with pytest.raises(AliasFileError):
+        AliasFile({"#work": "a@x.com"})  # serializes as a comment
+    with pytest.raises(AliasFileError):
+        AliasFile({"a:b": "a@x.com"})  # separator inside the name
+    with pytest.raises(AliasFileError):
+        AliasFile({"a\nb": "a@x.com"})  # newline inside the name
+
+
+def test_name_equal_to_other_address_rejected() -> None:
+    """An entry whose name equals another entry's address would be shadowed by
+    exact-address pass-through — refuse the overlap instead (#12.3)."""
+    with pytest.raises(AliasFileError):
+        AliasFile.parse("work: a@x.com\na@x.com: b@y.com\n")
+
+
+def test_address_membership_is_case_consistent() -> None:
+    """A known address in any case resolves to its canonical form, matching the
+    case-folded alias-name lookup (#12.4)."""
+    af = AliasFile.parse("work: me@company.com\n")
+    assert af.resolve("ME@company.com") == "me@company.com"
+
+
+def test_bad_address_parse_error_reports_line_number() -> None:
+    """A bad address reports its line number like every other parse error
+    (#12.5)."""
+    with pytest.raises(AliasFileError, match="line 2"):
+        AliasFile.parse("work: a@x.com\npersonal: not-an-email\n")
+
+
 def test_skill_documents_explicit_account_and_aliases() -> None:
     """The SKILL must tell chief to pass an explicit account resolved via the
     alias file, and to ask when a name is ambiguous rather than guessing."""
