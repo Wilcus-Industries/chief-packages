@@ -152,12 +152,45 @@ async def screen_gmail(
     return None
 
 
+def _register_auth_amplifier(context: Any, hooks: Any) -> None:
+    """Wire the broken-auth amplifier (#9) too.
+
+    The manifest gives a package ONE ``hooks:`` entry point, so this registrar is
+    also where the package's other ``post_tool`` hook — the broken-credential
+    amplifier in ``auth_failure.py`` — is wired. The boot loader execs this module
+    by file path without putting its dir on ``sys.path``, so a sibling import
+    needs that dir added first (idempotent; the same way ``conftest`` reaches these
+    scripts in tests). A failure here must not sink the Gmail screen, so it is
+    contained and logged rather than raised.
+    """
+    import os
+    import sys
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import auth_failure
+
+        auth_failure.register(context, hooks)
+    except Exception:
+        logger.error(
+            "google-workspace broken-auth amplifier failed to register; a broken "
+            "credential will still error (the raw tool error is not withheld) but "
+            "without the loud re-auth notice",
+            exc_info=True,
+        )
+
+
 def register(context: Any, hooks: Any) -> None:
     """Wire the inbound-Gmail post_tool screen. Called by the boot hook loader.
 
     ``context.classifier`` is the same primitive monitors use; the guard-model
-    prompt lives in the owner-editable classifier def, not in this code.
+    prompt lives in the owner-editable classifier def, not in this code. This is
+    also the package's single hook registrar, so it wires the broken-auth
+    amplifier (#9, ``auth_failure.py``) alongside the screen.
     """
+    _register_auth_amplifier(context, hooks)
     classifier = context.classifier
 
     # Boot-time check: if the classifier def was never seeded or was deleted,

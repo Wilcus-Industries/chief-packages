@@ -1,12 +1,9 @@
 ---
 name: google-workspace
-description: Gmail, Calendar, and Drive via a pinned Google Workspace MCP server — reads are open, writes go through the screening gate. Stub; built out over slices #4-#9.
+description: Gmail, Calendar, and Drive via a pinned Google Workspace MCP server — reads are open, writes go through the screening gate.
 ---
 
 # Google Workspace
-
-> **Stub.** High-level shape only; the full skill lands across slices #4-#9. Each
-> section names the slice that fills it in.
 
 Gmail, Calendar, and Drive access for chief, backed by a pinned upstream Google
 Workspace MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp))
@@ -227,4 +224,53 @@ server loads. A **second account** authorizes independently — its own
   clones it, applies `patches/0001-authentication-results-headers.patch` (which
   surfaces the `Authentication-Results` header the sender-trust catalog verifies)
   fail-loud, and warms deps — see INSTALL.md step 6.
-- Version + uninstall bookkeeping. TODO(#9).
+
+## Broken authorization fails loud and stays down
+
+A revoked refresh token, an expired consent, or an exhausted quota must **never**
+make the Google tools quietly disappear — a capability the owner keeps assuming
+they have is worse than one that visibly errors. So a broken credential fails
+**loud** and the tools stay **registered**: a `post_tool` amplifier
+(`scripts/auth_failure.py`) spots a broken-credential signal in a Google tool
+result and prepends a prominent, actionable re-auth notice, keeping the original
+error below it. Nothing is dropped or deregistered.
+
+- **Default loud, configurable.** `google_workspace.auth_failure_mode: loud`
+  (default) gives the full re-auth playbook; `quiet` is terser but **never
+  silent**, and an unrecognized value falls back to loud. This matches the
+  `anthropic-oauth` never-silently-fall-back stance.
+- **Auth vs quota.** A revoked/expired/insufficient-scope failure points at
+  re-consent (below); an exhausted quota says "wait / raise the quota", not
+  re-auth.
+- **Fixing it.** On a broken-auth notice, re-authorize the named account with the
+  consent-by-paste flow (see "Authorizing an account" above). Live detection
+  against a real revoked Google credential is exercised in #10; the mapping,
+  switch, and default are live now.
+
+## Staying current: deterministic version check
+
+The upstream server is pinned to an exact release (`patches/upstream.pin`) and
+never updates itself — it holds a Gmail send credential, so bumping the pin is a
+deliberate, owner-driven edit. To surface when a newer release is out,
+`scripts/version_check.py` reads the pin, asks GitHub for the repo's latest
+**stable** release, and — only when a newer tag exists — emits an owner
+notification. It is **purely deterministic: no model turn in the path.**
+
+```
+VC=skills/google-workspace/scripts/version_check.py
+uv run python $VC check          # exit 0 up to date, 10 newer (stdout notice), 2 error
+```
+
+Install wires it as a chief prompt-schedule or an OS timer (a platform choice —
+see INSTALL.md); either way the comparison happens in the script, not the model.
+A notification only means "consider bumping the pin"; nothing updates
+automatically.
+
+## Uninstalling
+
+`UNINSTALL.md` unwires the server, gate, and hooks, deletes the local Google
+credentials (`secrets/google_tokens/` + the `google_workspace_credentials`
+client) and package data, and **instructs the owner to revoke the grant on
+Google's side** (<https://myaccount.google.com/permissions>) — deleting local
+tokens stops this host from using them, but only the owner can revoke the grant
+at Google. It is never revoked automatically.

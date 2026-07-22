@@ -9,8 +9,9 @@
 # upstream MCP server, applies the auth-result-header patch (fail-loud), and
 # warms its deps (setup_upstream.sh, #7). Authorizing an account (consent by
 # paste, #8) is an interactive step the agent runs from INSTALL.md with the
-# copied oauth_consent.py, not here. The version stamp is a separate slice
-# (INSTALL.md TODO(#9)), not here.
+# copied oauth_consent.py, not here. It also copies version_check.py (#9), the
+# deterministic upstream-release check a schedule/timer runs; the pin in
+# patches/upstream.pin is the version stamp that check reads (no separate stamp).
 #
 # Parameters (env):
 #   GATE_MODEL   model id for the inbound-Gmail screening classifier, chosen at
@@ -40,6 +41,12 @@ cp "$here/scripts/tool_gate.py" "$dst/scripts/tool_gate.py"
 # path the skill/INSTALL document so `uv run python .../oauth_consent.py url …`
 # / `… exchange …` authorize an account and write its per-account credential.
 cp "$here/scripts/oauth_consent.py" "$dst/scripts/oauth_consent.py"
+# version_check.py is the deterministic upstream-release check (#9) — land it at
+# the path INSTALL/SKILL document so `uv run python .../version_check.py check`
+# works from a schedule or an OS timer. (auth_failure.py is NOT copied here: it
+# runs as a post_tool hook loaded from the cloned package dir by the manifest
+# `hooks:` block, not invoked from skills/.)
+cp "$here/scripts/version_check.py" "$dst/scripts/version_check.py"
 
 # The inbound-Gmail screen is a core classifier, so its definition has to live
 # in the classifiers dir, not the package. Never overwrite: the owner tunes this
