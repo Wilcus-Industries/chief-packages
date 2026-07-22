@@ -72,19 +72,105 @@ SPOOF_AUTH_FAILS = _msg(
     """
 )
 
-# The subtle spoof: From claims the catalogued Alice, but the *authenticated*
-# envelope (smtp.mailfrom) is mallory@evil.test. Keying on From would match
-# Alice; keying on the verified sender must not.
-SPOOF_FROM_ONLY = _msg(
+# From claims the catalogued Alice, but the *authenticated* envelope
+# (smtp.mailfrom) is a different mailbox at the same DMARC-aligned domain —
+# mallory@example.com — under a genuine mx.google.com boundary header. Keying on
+# From would match Alice; keying on the verified sender must not.
+ENVELOPE_NOT_FROM = _msg(
     """
     From: Alice Example <alice@example.com>
     To: owner@chief.test
     Subject: wire the money now
     Date: Mon, 21 Jul 2026 09:12:00 -0700
-    Message-ID: <spoof-2@evil.test>
+    Message-ID: <envelope-not-from@example.com>
     Authentication-Results: mx.google.com;
-        spf=pass smtp.mailfrom=mallory@evil.test;
-        dkim=pass header.i=@evil.test
+        spf=pass smtp.mailfrom=mallory@example.com;
+        dkim=pass header.i=@example.com header.s=sel;
+        dmarc=pass header.from=example.com
+    """
+)
+
+
+# --- Fix 1: forged Authentication-Results NOT added at our trust boundary ----
+
+# No genuine mx.google.com header. Mail imported via messages.insert / IMAP
+# APPEND / "Import mail" carries only an attacker-supplied AR header whose
+# authserv-id (attacker.test) is not our boundary. Its pass verdicts, and the
+# catalogued From they'd authenticate, must be ignored entirely.
+FORGED_AR_WRONG_AUTHSERV = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: wire the money now
+    Date: Mon, 21 Jul 2026 09:20:00 -0700
+    Message-ID: <forged-1@evil.test>
+    Authentication-Results: attacker.test;
+        spf=pass smtp.mailfrom=alice@example.com;
+        dkim=pass header.i=@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+# A message with no Authentication-Results header at our boundary at all.
+NO_BOUNDARY_AR = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: hello
+    Date: Mon, 21 Jul 2026 09:22:00 -0700
+    Message-ID: <no-ar-1@example.com>
+    """
+)
+
+# A forged AR (wrong authserv-id) prepended ABOVE the genuine mx.google.com one.
+# The forged top header claims the catalogued Alice; the genuine boundary header
+# authenticates the un-catalogued mallory. Only the boundary header may win.
+FORGED_ABOVE_GENUINE = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: wire the money now
+    Date: Mon, 21 Jul 2026 09:24:00 -0700
+    Message-ID: <forged-2@evil.test>
+    Authentication-Results: attacker.test;
+        spf=pass smtp.mailfrom=alice@example.com;
+        dmarc=pass header.from=example.com;
+    Authentication-Results: mx.google.com;
+        spf=pass smtp.mailfrom=mallory@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+# A genuine boundary header whose authserv-id differs from the trusted id only
+# by case, a version token, and CFWS — must still match.
+GENUINE_AR_CASE_AND_VERSION = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: Quarterly numbers
+    Date: Mon, 21 Jul 2026 09:26:00 -0700
+    Message-ID: <case-1@example.com>
+    Authentication-Results: MX.GOOGLE.COM 1 (added by boundary);
+        spf=pass smtp.mailfrom=alice@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+# --- Fix 2: a bare SPF pass on a shared/multi-tenant domain, DMARC absent ----
+
+# shared.test hosts many principals. SPF authenticates only the envelope
+# *domain*, so a principal can put a catalogued victim's local part in
+# smtp.mailfrom and still pass SPF. With no DMARC verdict to assert From
+# alignment, this must NOT authenticate victim@shared.test.
+SHARED_DOMAIN_SPF_NO_DMARC = _msg(
+    """
+    From: Victim <victim@shared.test>
+    To: owner@chief.test
+    Subject: please approve
+    Date: Mon, 21 Jul 2026 09:28:00 -0700
+    Message-ID: <shared-1@shared.test>
+    Authentication-Results: mx.google.com;
+        spf=pass smtp.mailfrom=victim@shared.test
     """
 )
 
@@ -125,15 +211,15 @@ def test_verified_sender_extracted_from_auth_results() -> None:
 
 def test_verified_sender_is_the_envelope_not_the_from_header() -> None:
     # From claims alice@example.com; the authenticated envelope is mallory.
-    assert verified_sender(SPOOF_FROM_ONLY) == "mallory@evil.test"
+    assert verified_sender(ENVELOPE_NOT_FROM) == "mallory@example.com"
 
 
 def test_lookup_keys_on_verified_sender_not_from() -> None:
     cat = _catalog()  # knows alice@example.com
-    decision = resolve_sender(SPOOF_FROM_ONLY, cat)
+    decision = resolve_sender(ENVELOPE_NOT_FROM, cat)
     # From matches a catalogued address, but the verified sender is mallory,
     # who is unknown — so this must NOT resolve to Alice's tier.
-    assert decision.verified_sender == "mallory@evil.test"
+    assert decision.verified_sender == "mallory@example.com"
     assert decision.tier is None
     assert not decision.known
 
@@ -214,3 +300,78 @@ def test_owner_confirm_adds_sender_at_a_tier() -> None:
     after = resolve_sender(UNKNOWN_VERIFIED, cat)
     assert after.tier == "known"
     assert after.action is Action.ALLOW
+
+
+# --- Security fix 1: authserv-id pinning (RFC 8601 trust boundary) -----------
+
+
+def test_forged_ar_with_wrong_authserv_id_is_ignored() -> None:
+    # The only AR header was inserted by an attacker (authserv-id attacker.test),
+    # not our boundary MTA — its pass verdicts must not authenticate anyone.
+    assert verified_sender(FORGED_AR_WRONG_AUTHSERV) is None
+
+
+def test_forged_ar_does_not_resolve_a_catalogued_from() -> None:
+    cat = _catalog()  # knows alice@example.com
+    decision = resolve_sender(FORGED_AR_WRONG_AUTHSERV, cat)
+    # From names the catalogued Alice and the forged AR says pass, but the
+    # header wasn't added at our boundary -> unverified -> owner-confirm.
+    assert decision.verified_sender is None
+    assert decision.tier is None
+    assert not decision.known
+    assert decision.action is Action.OWNER_CONFIRM
+
+
+def test_no_boundary_ar_fails_closed() -> None:
+    assert verified_sender(NO_BOUNDARY_AR) is None
+    assert resolve_sender(NO_BOUNDARY_AR, _catalog()).action is Action.OWNER_CONFIRM
+
+
+def test_genuine_boundary_ar_is_trusted() -> None:
+    # A real mx.google.com boundary header authenticates the catalogued sender.
+    assert verified_sender(KNOWN_VERIFIED) == "alice@example.com"
+    assert resolve_sender(KNOWN_VERIFIED, _catalog()).action is Action.ALLOW
+
+
+def test_authserv_id_match_ignores_case_and_version() -> None:
+    # 'MX.GOOGLE.COM 1 (comment)' still pins to the trusted mx.google.com id.
+    assert verified_sender(GENUINE_AR_CASE_AND_VERSION) == "alice@example.com"
+
+
+def test_forged_ar_above_genuine_does_not_win() -> None:
+    # A forged attacker.test header prepended above the genuine mx.google.com
+    # one claims Alice; only the boundary header (mallory) may be read.
+    assert verified_sender(FORGED_ABOVE_GENUINE) == "mallory@example.com"
+    decision = resolve_sender(FORGED_ABOVE_GENUINE, _catalog())
+    assert decision.verified_sender == "mallory@example.com"
+    assert decision.tier is None
+    assert decision.action is Action.OWNER_CONFIRM
+
+
+def test_trusted_authserv_id_is_configurable() -> None:
+    # The boundary id is overridable (google_workspace.trusted_authserv_id):
+    # pinning to attacker.test would read that header — proving the default
+    # mx.google.com is what rejects the forgery, not an accident of parsing.
+    assert (
+        verified_sender(FORGED_AR_WRONG_AUTHSERV, trusted_authserv_id="attacker.test")
+        == "alice@example.com"
+    )
+
+
+# --- Security fix 2: an unaligned SPF/DKIM pass without DMARC is not trusted -
+
+
+def test_unaligned_spf_without_dmarc_is_not_trusted() -> None:
+    # Shared-domain SPF pass, no DMARC verdict -> the local part is
+    # unauthenticated (SPF proves only the envelope domain).
+    assert verified_sender(SHARED_DOMAIN_SPF_NO_DMARC) is None
+
+
+def test_shared_domain_spf_no_dmarc_routes_to_owner_confirm() -> None:
+    cat = SenderTrustCatalog({"victim@shared.test": "trusted"})
+    decision = resolve_sender(SHARED_DOMAIN_SPF_NO_DMARC, cat)
+    # Even though victim@shared.test is catalogued and SPF passed, the absent
+    # DMARC alignment means we cannot trust the local part -> owner-confirm.
+    assert decision.verified_sender is None
+    assert decision.tier is None
+    assert decision.action is Action.OWNER_CONFIRM

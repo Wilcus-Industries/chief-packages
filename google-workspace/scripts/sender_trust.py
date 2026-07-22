@@ -14,6 +14,20 @@ fails is never matched as a known sender — even when its ``From`` names a
 catalogued address — and a ``From``-only spoof of a known address does not
 resolve to that sender's tier.
 
+That rule only holds if the AR verdicts are themselves trustworthy, so two
+fail-closed boundaries protect the parse (both RFC 8601 §5/§7):
+
+- **authserv-id pinning.** Only the AR header added by *our* boundary MTA
+  (``google_workspace.trusted_authserv_id``, default ``mx.google.com``) is
+  read. Any other AR header — upstream, or attacker-inserted on mail with no
+  genuine boundary AR (``messages.insert`` / IMAP ``APPEND`` / "Import mail") —
+  is forgeable and ignored. This assumes the boundary MTA strips inbound AR
+  headers bearing its own authserv-id before adding its genuine one, which
+  Google does; without a boundary AR the message fails closed to ``None``.
+- **DMARC alignment.** SPF/DKIM authenticate a *domain*, not the ``From`` local
+  part, so an identity is trusted only when an explicit ``dmarc=pass`` asserts
+  ``From`` alignment. Absent DMARC → ``None`` (see ``verified_sender``).
+
 Scope note: this module is the trust catalog + verified-sender resolution only.
 Reads are open; binding the write tools to a screening/approval gate lands in the
 later google-workspace slices (#5 screening, #6 write-gate). ``resolve_sender``
@@ -44,6 +58,18 @@ _METHODS = frozenset({_SPF, _DKIM, _DMARC})
 
 _PASS = "pass"
 _FAIL = "fail"
+
+# The ``Authentication-Results`` header is only trustworthy when it was added at
+# *our* trust boundary. RFC 8601 §5/§7: a consumer MUST pin its own authserv-id
+# and MUST ignore AR headers not added by its boundary MTA — any other AR header
+# (upstream, or attacker-inserted via ``messages.insert`` / IMAP ``APPEND`` /
+# "Import mail") is forgeable and its verdicts are worthless. For these Gmail
+# Workspace accounts the receiving MTA is Google, so the boundary authserv-id
+# defaults to ``mx.google.com``; the owner can override it via the
+# ``google_workspace.trusted_authserv_id`` config key when mail arrives behind a
+# different boundary MTA.
+CONFIG_KEY_TRUSTED_AUTHSERV_ID = "google_workspace.trusted_authserv_id"
+DEFAULT_TRUSTED_AUTHSERV_ID = "mx.google.com"
 
 
 # --------------------------------------------------------------------------- #
@@ -82,10 +108,27 @@ def _strip_comments(value: str) -> str:
     return "".join(out)
 
 
-def _parse_one_header(value: str) -> list[AuthResult]:
+def _header_authserv_id(fields: list[str]) -> str:
+    """The authserv-id token (RFC 8601 §2.2), lower-cased for a case-insensitive
+    boundary match.
+
+    It is the first token of the header — before the first ``;`` and before any
+    optional version number or CFWS. Comments are already stripped by the
+    caller, so a trailing version digit-string is simply a second token we drop.
+    """
+    if not fields:
+        return ""
+    head_tokens = fields[0].split()
+    return head_tokens[0].strip().lower() if head_tokens else ""
+
+
+def _parse_one_header(value: str) -> tuple[str, list[AuthResult]]:
+    """Parse one header into its authserv-id and the method verdicts it carries."""
+    fields = _strip_comments(value).split(";")
+    authserv_id = _header_authserv_id(fields)
     results: list[AuthResult] = []
     # Each ';'-delimited field after the authserv-id is one method's resinfo.
-    for field in _strip_comments(value).split(";"):
+    for field in fields:
         tokens = field.split()
         if not tokens:
             continue
@@ -102,16 +145,28 @@ def _parse_one_header(value: str) -> list[AuthResult]:
                 key, _, val = tok.partition("=")
                 props[key.strip().lower()] = val.strip()
         results.append(AuthResult(method, result.strip().lower(), props))
-    return results
+    return authserv_id, results
 
 
-def parse_authentication_results(raw_message: str) -> list[AuthResult]:
-    """All method verdicts across every ``Authentication-Results`` header."""
+def parse_authentication_results(
+    raw_message: str, trusted_authserv_id: str
+) -> list[AuthResult]:
+    """Method verdicts from the ``Authentication-Results`` header added at *our*
+    trust boundary — never any other AR header on the message.
+
+    Only a header whose authserv-id matches ``trusted_authserv_id`` (case-
+    insensitive exact match, version/CFWS ignored) is trusted; every other
+    ``Authentication-Results`` header is forgeable and ignored (RFC 8601 §5/§7).
+    The **topmost** matching header wins. When *no* header matches, returns
+    ``[]`` — fail closed: nothing was authenticated at our boundary.
+    """
     msg = message_from_string(raw_message)
-    results: list[AuthResult] = []
+    trusted = trusted_authserv_id.strip().lower()
     for header in msg.get_all("Authentication-Results", []):
-        results.extend(_parse_one_header(str(header)))
-    return results
+        authserv_id, results = _parse_one_header(str(header))
+        if authserv_id == trusted:
+            return results  # topmost matching (boundary) header wins
+    return []
 
 
 def _verdict(results: list[AuthResult], method: str) -> AuthResult | None:
@@ -132,21 +187,30 @@ def _normalize_address(addr: str) -> str:
     return (parsed or addr).strip().strip("<>").lower()
 
 
-def verified_sender(raw_message: str) -> str | None:
+def verified_sender(
+    raw_message: str,
+    trusted_authserv_id: str = DEFAULT_TRUSTED_AUTHSERV_ID,
+) -> str | None:
     """The authenticated sender address, or ``None`` if verification fails.
 
-    Derived from the ``Authentication-Results`` *parameters* of a passing
-    mechanism — SPF ``smtp.mailfrom`` or DKIM ``header.i`` / ``header.d`` — never
-    from the ``From`` header. Gated by DMARC alignment:
+    Two fail-closed trust boundaries gate the answer:
 
-    - No SPF or DKIM pass at all → ``None`` (nothing was authenticated).
-    - An explicit ``dmarc=fail`` → ``None``, even if SPF/DKIM passed for some
-      *other* domain (the ``From`` alignment failed, so ``From`` can't be
-      trusted).
-    - Otherwise the passing mechanism's identity is returned, SPF preferred
-      (a full envelope address) over DKIM (often domain-only).
+    1. **authserv-id pinning** (RFC 8601 §5/§7). Only the ``Authentication-
+       Results`` header added by our own boundary MTA (``trusted_authserv_id``,
+       default ``mx.google.com``) is read; forged / upstream AR headers are
+       ignored. No boundary header on the message → ``None``.
+    2. **DMARC alignment.** The identity comes from a passing SPF
+       (``smtp.mailfrom``) or DKIM (``header.i`` / ``header.d``) mechanism —
+       never the forgeable ``From`` — but SPF/DKIM authenticate the envelope /
+       signing *domain*, not the ``From`` local part. Only an explicit
+       ``dmarc=pass`` asserts that ``From`` alignment, so verification requires
+       it: a missing or non-pass DMARC → ``None`` (a bare SPF pass on a shared /
+       multi-tenant domain would otherwise authenticate *any* local part there).
+
+    SPF's ``smtp.mailfrom`` (a full envelope address) is preferred over DKIM
+    (often domain-only).
     """
-    results = parse_authentication_results(raw_message)
+    results = parse_authentication_results(raw_message, trusted_authserv_id)
     spf = _verdict(results, _SPF)
     dkim = _verdict(results, _DKIM)
     dmarc = _verdict(results, _DMARC)
@@ -155,7 +219,10 @@ def verified_sender(raw_message: str) -> str | None:
     dkim_ok = dkim is not None and dkim.result == _PASS
     if not (spf_ok or dkim_ok):
         return None
-    if dmarc is not None and dmarc.result != _PASS:
+    # DMARC is the only verdict that asserts From-alignment; require it present
+    # and passing. Fail closed when it is absent — a bare SPF/DKIM pass does not
+    # authenticate the local part on a shared domain.
+    if dmarc is None or dmarc.result != _PASS:
         return None
 
     if spf_ok and spf is not None:
@@ -276,16 +343,20 @@ class TrustDecision:
 
 
 def resolve_sender(
-    raw_message: str, catalog: SenderTrustCatalog
+    raw_message: str,
+    catalog: SenderTrustCatalog,
+    trusted_authserv_id: str = DEFAULT_TRUSTED_AUTHSERV_ID,
 ) -> TrustDecision:
     """Resolve a raw message to a trust decision.
 
     Verified known sender → its tier, ``ALLOW``. Everything else (verification
     failed, or the verified sender isn't catalogued) → a metadata-only log and
     the ``OWNER_CONFIRM`` flow. Crucially, the lookup keys on ``verified_sender``,
-    so a ``From``-only spoof of a catalogued address never resolves to its tier.
+    so a ``From``-only spoof of a catalogued address never resolves to its tier —
+    and ``verified_sender`` itself only trusts an AR header added at our
+    ``trusted_authserv_id`` boundary and backed by an explicit ``dmarc=pass``.
     """
-    verified = verified_sender(raw_message)
+    verified = verified_sender(raw_message, trusted_authserv_id)
     tier = catalog.lookup(verified)
     if tier is not None:
         return TrustDecision(verified, tier, Action.ALLOW, metadata=None)

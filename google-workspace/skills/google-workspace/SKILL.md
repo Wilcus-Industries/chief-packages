@@ -34,6 +34,20 @@ forgeable `From`:
   envelope facts, never the body) and routed to the owner-confirm flow; once the
   owner confirms, it is catalogued at a tier and future verified mail resolves.
 
+Two fail-closed boundaries keep the auth verdicts themselves honest (RFC 8601
+§5/§7):
+
+- **authserv-id pinning.** Only the `Authentication-Results` header added by
+  *our* boundary MTA is trusted — its authserv-id must match
+  `google_workspace.trusted_authserv_id` (default `mx.google.com`, overridable
+  per install). Any other AR header — upstream, or attacker-inserted on mail
+  with no genuine boundary AR (`messages.insert` / IMAP `APPEND` / "Import
+  mail") — is forgeable and ignored. No boundary header ⇒ unverified.
+- **DMARC alignment.** SPF/DKIM authenticate a *domain*, not the `From` local
+  part, so an identity is trusted only when an explicit `dmarc=pass` asserts
+  `From` alignment. A bare SPF/DKIM pass with DMARC absent ⇒ unverified (else a
+  shared/multi-tenant domain could authenticate any address at that domain).
+
 Implementation: `google-workspace/scripts/sender_trust.py`
 (`verified_sender`, `SenderTrustCatalog`, `resolve_sender`). The catalog is the
 deterministic layer; binding its `owner_confirm` decision to the actual approval
