@@ -14,8 +14,12 @@ Depends on the `screening` package for that gating.
 2. Owner consent + OAuth. TODO(#8): capture the owner's Google account grant and
    store the OAuth client/credentials under the `google_workspace_credentials`
    secret; record account scope in the `google_workspace` config key.
-3. Tool catalog + read/write split. TODO(#4): enumerate the server's tools and
+3. Tool catalog + read/write split. TODO: enumerate the server's tools and
    mark which are reads vs. writes.
+   Inbound sender trust (#4): the sender trust catalog
+   (`google-workspace/scripts/sender_trust.py`) keys inbound mail on the
+   verified auth-result sender — see the skill's "Inbound sender trust" section.
+   Unknown verified senders route to owner-confirm; the gate binding is #6.
 4. Write gate. TODO(#6): bind the write tools to a `screening` approval gate so
    sending mail / editing events / modifying Drive requires owner confirmation.
 5. Pin + patch the upstream server. TODO(#7): finalize and pin the exact `uvx`

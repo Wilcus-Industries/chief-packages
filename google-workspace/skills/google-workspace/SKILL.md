@@ -16,7 +16,28 @@ recorded in the `google_workspace` config key.
 ## Reading
 
 Read tools (list/search mail, read events, list Drive files) are open — no gate.
-TODO(#4): catalog the exact read tools this server exposes.
+TODO: catalog the exact read tools this server exposes (read/write tool split).
+
+## Inbound sender trust
+
+Inbound mail is untrusted until proven otherwise. chief keeps a **sender trust
+catalog** — a per-sender tier table, ported from core's iMessage sender
+whitelist — that answers "is this sender really who they claim to be" before any
+prompt sees the message. It is keyed on the **authenticated** sender parsed from
+the message's `Authentication-Results` headers (SPF/DKIM/DMARC), **never** the
+forgeable `From`:
+
+- A message whose auth-result headers fail verification is **not** treated as a
+  known sender — even if its `From` names a catalogued address (a spoof).
+- A verified sender that is catalogued resolves to its tier.
+- A verified sender that is **not** catalogued is logged **metadata-only** (its
+  envelope facts, never the body) and routed to the owner-confirm flow; once the
+  owner confirms, it is catalogued at a tier and future verified mail resolves.
+
+Implementation: `google-workspace/scripts/sender_trust.py`
+(`verified_sender`, `SenderTrustCatalog`, `resolve_sender`). The catalog is the
+deterministic layer; binding its `owner_confirm` decision to the actual approval
+gate is the write-gate slice's job (see below).
 
 ## Writing is gated
 

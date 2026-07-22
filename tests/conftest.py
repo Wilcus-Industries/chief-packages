@@ -98,6 +98,25 @@ def _ensure_core_on_path() -> bool:
 CORE_AVAILABLE: bool = _ensure_core_on_path()
 
 
+def _package_scripts_on_path(package: str) -> None:
+    """Put a package's ``scripts/`` dir on ``sys.path`` so its sandbox-run
+    modules import bare in tests (e.g. ``import sender_trust``).
+
+    The package dirs are hyphenated (not importable as packages), so their
+    scripts are reached the same way core is: by path insertion, at import
+    time. Slices that ship testable package code (google-workspace #4–#6) reuse
+    this instead of each re-deriving the path.
+    """
+    scripts = repo_root() / package / "scripts"
+    if scripts.is_dir():
+        src = str(scripts)
+        if src not in sys.path:
+            sys.path.insert(0, src)
+
+
+_package_scripts_on_path("google-workspace")
+
+
 @pytest.fixture
 def core_available() -> bool:
     return CORE_AVAILABLE

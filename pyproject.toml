@@ -16,6 +16,22 @@ dev = [
     "pyyaml>=6",
     "ruff>=0.6",
     "mypy>=1.11",
+    # chief core's runtime deps. Tests reach real core seams (chief.gate,
+    # chief.hooks.posttool, chief.classifiers, …) by putting a local core
+    # checkout's src/ on sys.path (see tests/conftest.py) — but those seams
+    # transitively import these third-party packages, so without them the
+    # import fails at collection. Pinned to match core's pyproject; keep in
+    # step when core bumps. (The stdlib-only chief.mcp_manifest loader needs
+    # none of these; the heavier seams the later google-workspace slices touch
+    # do.)
+    "httpx>=0.28",
+    "sqlalchemy[asyncio]>=2",
+    "aiosqlite>=0.20",
+    "croniter>=3",
+    "starlette>=0.47",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.18",
+    "mcp>=1",
 ]
 
 [tool.uv]
@@ -49,6 +65,9 @@ exclude = ['^(?!tests/).+\.py$']
 
 # core's mcp_manifest is imported at runtime via sys.path (see tests/conftest);
 # mypy can't see it, and pyyaml ships no inline stubs for the bare `yaml` name.
+# `sender_trust` is a google-workspace sandbox-run script reached the same way
+# (conftest puts its scripts/ dir on sys.path) — outside mypy's tests/ scope,
+# so its import in the tests is treated like core's.
 [[tool.mypy.overrides]]
-module = ["chief", "chief.*", "yaml"]
+module = ["chief", "chief.*", "yaml", "sender_trust"]
 ignore_missing_imports = true
