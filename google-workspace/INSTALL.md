@@ -1,10 +1,11 @@
 # Installing google-workspace
 
 > **Stub.** This slice adds the manifest, its test harness, the alias-helper
-> install wiring (step 1), and the gate posture (steps 4–5: the read/write tool
-> split and the write-gate registration). The remaining steps are stubbed with
-> `TODO(#N)` pointers to the slices that build them out. Do not treat the OAuth,
-> server-pin, or bookkeeping steps as complete yet.
+> install wiring (step 1), the gate posture (steps 4–5: the read/write tool
+> split and the write-gate registration), and the consent-by-paste OAuth flow
+> (step 3). The remaining steps are stubbed with `TODO(#N)` pointers to the
+> slices that build them out. Do not treat the server-pin or bookkeeping steps
+> as complete yet.
 
 Gmail, Calendar, and Drive for chief, via a pinned upstream Google Workspace
 MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp),
@@ -28,9 +29,28 @@ Depends on the `screening` package for that gating.
    dropped), a screener error fails safe to clean. It loads automatically once
    the package is recorded in `data/installed.yaml` (step 7). See the skill's
    "Screening inbound mail before the model reads it" section.
-3. Owner consent + OAuth. TODO(#8): capture the owner's Google account grant and
-   store the OAuth client/credentials under the `google_workspace_credentials`
-   secret; record account scope in the `google_workspace` config key.
+3. Owner consent + OAuth (consent by paste). First place the OAuth **client**:
+   download a **desktop** OAuth client JSON from Google Cloud Console and save it
+   as the `google_workspace_credentials` secret (`secrets/google_workspace_credentials`).
+   Then authorize each account by paste — chief's host runs no callback
+   listener, so consent comes back as a pasted redirect string, not a caught
+   redirect:
+   ```
+   OC=skills/google-workspace/scripts/oauth_consent.py
+   uv run python $OC url me@company.com          # consent URL to hand the owner
+   uv run python $OC exchange me@company.com "<pasted redirect string>"
+   ```
+   The owner opens the URL on any device, consents, and pastes back the whole
+   `http://localhost/?code=…` their browser lands on; `exchange` parses the
+   code (a malformed paste is rejected), exchanges it, and writes the credential
+   **keyed by address** to `secrets/google_tokens/<address>.json` — owner-only
+   (0600) in a 0700 dir, in the Google authorized-user shape the upstream server
+   reads. A second account authorizes independently. **Coupling (#7):** point the
+   pinned `workspace-mcp` server's credentials directory at `secrets/google_tokens/`
+   (or override this package's dir via the `google_workspace` config key) so the
+   server loads the same files consent writes. **Mock-debt (#8 → #10):** the
+   exchange was built/tested against a fixture token endpoint; the live Google
+   exchange lands in #10.
 4. Tool catalog + read/write split. The manifest command launches the server
    with `--tool-tier core --tools gmail drive calendar`, so it registers only
    the `core`-tier Gmail / Calendar / Drive tools — sixteen, each classified

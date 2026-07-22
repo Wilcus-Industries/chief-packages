@@ -5,8 +5,10 @@
 # inbound-Gmail screening classifier (#5). The post-tool screening hook itself is
 # registered by the boot loader from the manifest's `hooks:` block once the
 # package is recorded in data/installed.yaml (INSTALL.md step 7) — no copy needed,
-# the loader reads the cloned package dir. The MCP server version pin and the
-# OAuth grant are still separate slices (INSTALL.md TODO(#7)/(#8)/(#9)), not here.
+# the loader reads the cloned package dir. Authorizing an account (consent by
+# paste, #8) is an interactive step the agent runs from INSTALL.md with the
+# copied oauth_consent.py, not here. The MCP server version pin and the version
+# stamp are still separate slices (INSTALL.md TODO(#7)/(#9)), not here.
 #
 # Parameters (env):
 #   GATE_MODEL   model id for the inbound-Gmail screening classifier, chosen at
@@ -32,6 +34,10 @@ cp "$here/scripts/gw_aliases.py" "$dst/scripts/gw_aliases.py"
 # skill/INSTALL document so `uv run python .../tool_gate.py reads` works to list
 # the read tool names to register on the gate's approve set.
 cp "$here/scripts/tool_gate.py" "$dst/scripts/tool_gate.py"
+# oauth_consent.py is the consent-by-paste OAuth helper (#8) — land it at the
+# path the skill/INSTALL document so `uv run python .../oauth_consent.py url …`
+# / `… exchange …` authorize an account and write its per-account credential.
+cp "$here/scripts/oauth_consent.py" "$dst/scripts/oauth_consent.py"
 
 # The inbound-Gmail screen is a core classifier, so its definition has to live
 # in the classifiers dir, not the package. Never overwrite: the owner tunes this

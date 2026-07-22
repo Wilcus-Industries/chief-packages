@@ -65,14 +65,14 @@ exclude = ['^(?!tests/).+\.py$']
 
 # core's mcp_manifest is imported at runtime via sys.path (see tests/conftest);
 # mypy can't see it, and pyyaml ships no inline stubs for the bare `yaml` name.
-# gw_aliases (#3), sender_trust (#4), gmail_screen (#5), and tool_gate (#6) are
-# google-workspace
+# gw_aliases (#3), sender_trust (#4), gmail_screen (#5), tool_gate (#6), and
+# oauth_consent (#8) are google-workspace
 # package-dir scripts reached via sys.path too (conftest puts their scripts/ dir
 # on it) — outside mypy's tests/-only scope, so their import in the tests is
 # treated like core's.
 [[tool.mypy.overrides]]
 module = [
     "chief", "chief.*", "yaml",
-    "gw_aliases", "sender_trust", "gmail_screen", "tool_gate",
+    "gw_aliases", "sender_trust", "gmail_screen", "tool_gate", "oauth_consent",
 ]
 ignore_missing_imports = true
