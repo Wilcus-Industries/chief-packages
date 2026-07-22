@@ -20,10 +20,13 @@ deregistration). The tool is still there; the failure is just impossible to miss
 
 The *error-shaped* gate (:func:`is_error_shaped`) matters because a Gmail read
 returns attacker-influenced content: an inbound email quoting "invalid_grant"
-must not fire a false re-auth notice on a healthy read. Only a result that is
-itself an error envelope — core's ``error:`` marker, an ``<HttpError>`` /
-``RefreshError`` repr, an OAuth error body — is amplified; successful content is
-never touched.
+must not fire a false re-auth notice on a healthy read. The gate keys on the ONE
+unforgeable signal — core's leading ``error:`` prefix at position 0 (core renders
+a failed MCP result as ``error: …`` and a success verbatim) — never on
+body-matchable substrings like ``<HttpError>`` / ``RefreshError`` /
+``error_description``, which an email body could carry to forge the notice.
+Successful content is never touched; a real broken credential reaches this hook
+as an ``error:``-prefixed MCP error, so it is still amplified.
 
 Loud by default, configurable:
 
@@ -136,28 +139,23 @@ _QUOTA_SIGNALS: tuple[str, ...] = (
 _AUTH_RE = re.compile("|".join(re.escape(s) for s in _AUTH_SIGNALS), re.IGNORECASE)
 _QUOTA_RE = re.compile("|".join(re.escape(s) for s in _QUOTA_SIGNALS), re.IGNORECASE)
 
-# Markers that a result is an ERROR envelope, not successful content that merely
-# *mentions* an auth term. core (``chief.mcpclient.manager``) renders a failed
-# MCP tool result with a leading ``error:``; the google client libraries render a
-# failure as ``<HttpError ...>``, a ``*Error: ...`` exception repr, or an OAuth
-# ``{'error': ..., 'error_description': ...}`` token-endpoint envelope. A plain
-# inbound-email body carries none of these shapes, so an attacker can't turn a
-# healthy read into a fake broken-credential notice just by quoting "invalid_grant".
-_ERROR_SHAPE_SIGNALS: tuple[str, ...] = (
-    "<httperror",  # googleapiclient error repr
-    "refresherror",  # google.auth RefreshError
-    "googleautherror",
-    "defaultcredentialserror",
-    "transporterror",
-    "error_description",  # OAuth token-endpoint error field
-)
-_ERROR_SHAPE_RE = re.compile(
-    r"^\s*error:"  # core's isError marker (chief.mcpclient renders "error: …")
-    "|" + "|".join(re.escape(s) for s in _ERROR_SHAPE_SIGNALS)
-    # a JSON/dict OAuth error envelope: "error": / 'error':
-    + r"|['\"]error['\"]\s*:",
-    re.IGNORECASE,
-)
+# The one marker that a result is an ERROR envelope rather than successful content
+# that merely *mentions* an auth term: core's leading ``error:`` prefix. core
+# (``chief.mcpclient.manager._make_handler``) renders a failed MCP tool result as
+# ``f"error: {text}"`` and a successful one *verbatim*, so only a genuine tool
+# error carries this prefix at position 0.
+#
+# It is gated on *position 0 alone* — deliberately NOT on body-matchable substrings
+# like ``<HttpError>`` / ``RefreshError`` / ``error_description`` / ``'error':``.
+# A successful Gmail (or Drive/Calendar) read returns attacker-influenceable content:
+# an inbound email quoting ``<HttpError ... invalid_grant>`` in its body would match
+# any such substring and — paired with the auth signals also in that body — forge the
+# loud "AUTHORIZATION IS BROKEN … re-consent by paste" notice *outside* the untrusted
+# fence. The leading ``error:`` prefix cannot be forged that way: a read's rendered
+# output always leads with structured metadata (or, on a real failure, core's own
+# ``error:``), never with attacker-chosen bytes at position 0. A broken credential
+# reaches this hook as an MCP error, so it always arrives ``error:``-prefixed.
+_ERROR_SHAPE_RE = re.compile(r"^\s*error:", re.IGNORECASE)
 
 
 def is_google_workspace_tool(tool_name: str) -> bool:
@@ -188,13 +186,16 @@ def is_credential_failure(result: str) -> bool:
 
 def is_error_shaped(result: str) -> bool:
     """True when a tool result is itself an ERROR envelope — core marked it a tool
-    error (leading ``error:``), or it carries a google-auth / HTTP / OAuth error
-    shape — as opposed to *successful* content that merely mentions an auth term.
+    error with its leading ``error:`` prefix (position 0) — as opposed to
+    *successful* content that merely mentions an auth term.
 
-    The amplifier gates on this so an inbound email containing the literal
-    ``invalid_grant`` / "expired or revoked" (attacker-influenceable content on a
-    healthy read) can't fake a broken credential and fire a false loud re-auth
-    notice. Purely deterministic — a literal-shape scan, no model call."""
+    Gated on the leading prefix ALONE, never on body-matchable substrings: an
+    inbound email quoting ``<HttpError ... invalid_grant>`` in its body (attacker-
+    influenceable content on a healthy read) must not be able to fake a broken
+    credential and fire the loud re-auth notice. Only core's own ``error:`` prefix
+    — which a read's rendered output can never lead with — counts. A genuine broken
+    credential arrives here as an ``error:``-prefixed MCP error, so it still fires.
+    Purely deterministic — a leading-prefix scan, no model call."""
     return bool(result) and _ERROR_SHAPE_RE.search(result) is not None
 
 
@@ -303,9 +304,10 @@ def register(context: Any, hooks: Any) -> None:
             return None
         # Only amplify an ERROR-shaped result. A successful Gmail read is
         # attacker-influenced inbound content: an email quoting "invalid_grant"
-        # must not trigger a false "AUTHORIZATION IS BROKEN" notice on a healthy
-        # read. A real broken credential arrives as an error envelope (core's
-        # "error:" marker, an <HttpError>/RefreshError repr, an OAuth error body).
+        # (even alongside an <HttpError>/RefreshError repr in its body) must not
+        # trigger a false "AUTHORIZATION IS BROKEN" notice on a healthy read. A real
+        # broken credential arrives as an MCP error, which core renders with its
+        # unforgeable leading "error:" prefix — the one signal is_error_shaped trusts.
         if not is_error_shaped(result):
             return None
         account = None

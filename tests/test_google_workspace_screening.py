@@ -351,10 +351,12 @@ def test_register_is_quiet_when_classifier_def_present(
 
 # --- Fix 2: the broken-auth amplifier reaches production via register() -------
 
-# A revoked-refresh-token error, shaped like google-auth's RefreshError — the
-# broken-credential signal the amplifier (auth_failure.py) fires on.
+# A revoked-refresh-token error as it reaches post_tool: core renders a failed MCP
+# result with a leading ``error:`` prefix (chief.mcpclient.manager), the unforgeable
+# marker the amplifier (auth_failure.py) fires on. Without the prefix a bare repr is
+# treated as (attacker-influenceable) content and NOT amplified.
 REVOKED_CREDENTIAL_ERROR = (
-    "google.auth.exceptions.RefreshError: ('invalid_grant: Token has been "
+    "error: google.auth.exceptions.RefreshError: ('invalid_grant: Token has been "
     "expired or revoked.', {'error': 'invalid_grant'})"
 )
 
