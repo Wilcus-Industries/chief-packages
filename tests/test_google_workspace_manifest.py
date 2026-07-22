@@ -80,3 +80,39 @@ def test_malformed_mcp_servers_rejected(core_available: bool) -> None:
     malformed = {"gw": {"url": "https://example.test", "command": ["uvx", "x"]}}
     problems = validate_mcp_servers(MANIFEST_PATH, malformed)
     assert problems, "validator must reject a server that sets both url and command"
+
+
+# --- The inbound-Gmail screening hook (slice #5) is wired in the manifest -----
+
+
+def test_manifest_declares_screening_hook() -> None:
+    """The post-tool screen (#5) is wired via a ``hooks`` block whose module
+    file actually exists on disk."""
+    hooks = _load()["hooks"]
+    assert isinstance(hooks, dict)
+    assert hooks["module"] == "scripts/gmail_screen.py"
+    assert hooks["register"] == "register"
+    module = MANIFEST_PATH.parent / str(hooks["module"])
+    assert module.is_file(), f"declared hook module not on disk: {module}"
+
+
+def test_hooks_block_parses_and_validates_through_real_loader(
+    core_available: bool,
+) -> None:
+    """The REAL ``chief.packages`` loader parses the hooks block into a
+    ``HookSpec`` and reports no well-formedness problems for the package."""
+    if not core_available:
+        pytest.skip(
+            "chief core checkout not found — cannot run the REAL package loader"
+        )
+    from chief.packages import PackageLibrary, validate
+
+    root = MANIFEST_PATH.parent.parent  # the repo root holding the package dirs
+    package = PackageLibrary((root,)).get("google-workspace")
+    assert package is not None
+    assert package.hooks is not None
+    assert package.hooks.module == "scripts/gmail_screen.py"
+    assert package.hooks.register == "register"
+
+    # The real validator (run in core's done-check) accepts the hooks block.
+    assert validate((root,)) == []
