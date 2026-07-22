@@ -2,9 +2,14 @@
 """Tool catalog + read/write split for the google-workspace MCP server.
 
 This is the security-load-bearing manifest for slice #6. The upstream server
-(taylorwilsdon/google_workspace_mcp) is launched at the ``core`` tool tier
-restricted to Gmail / Calendar / Drive — sixteen tools. Each is classified
-**read** (safe to auto-approve) or **write** (must ask). chief core registers a
+(taylorwilsdon/google_workspace_mcp) is launched with
+``--tool-tier core --tools gmail drive calendar`` (the flags live in
+``manifest.yaml``'s ``mcp_servers`` command) — the ``core`` tool tier restricted
+to Gmail / Calendar / Drive, sixteen tools. Without those flags upstream
+registers *every* service at *every* tier (~60 tools), so the restriction — and
+the read/write split below — is only real because the command carries them.
+Each tool is classified **read** (safe to auto-approve) or **write** (must ask).
+chief core registers a
 discovered MCP tool under the qualified name ``mcp_<server>_<tool>`` (see
 ``chief.mcpclient.manager``), so with this package's server name
 ``google-workspace`` a tool ``send_gmail_message`` reaches the gate as
@@ -25,6 +30,18 @@ default-allow. A write tool is gated *because it is absent from an allowlist*, n
 because it is on a denylist — so a newly-added or mis-catalogued tool that nobody
 allowlisted still raises the card by default. ``tool_gate`` therefore only ever
 grows the **read** allowlist; it never enumerates writes into ``gate.approved``.
+
+**Depends on: MCP tools registering ``read_only=False``.** The gate has a
+*second* auto-approve path besides the allowlist — a tool whose
+``ToolSpec.read_only`` is True auto-approves even when it is not on
+``gate.approved`` (``chief.gate.GatedTools.dispatch``). This posture holds only
+because ``chief.mcpclient.manager._register_tools`` hard-codes ``read_only=False``
+for every MCP tool: it does **not** read the tool's ``readOnlyHint`` annotation.
+That matters because upstream annotates the disk-writing
+``get_drive_file_download_url`` with ``readOnlyHint=True`` — if core ever
+propagated that hint into ``ToolSpec.read_only``, that write would auto-approve
+with no card, silently defeating this whole split. A core-seam regression test
+(``tests/test_google_workspace_read_only_guard.py``) pins that dependency.
 
 Classification rule: a tool is a **read** only if it neither mutates remote
 Google state, nor sends/shares anything outward, nor writes bytes to local disk.

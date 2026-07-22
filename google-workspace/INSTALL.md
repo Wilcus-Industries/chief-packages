@@ -21,9 +21,12 @@ Depends on the `screening` package for that gating.
 3. Owner consent + OAuth. TODO(#8): capture the owner's Google account grant and
    store the OAuth client/credentials under the `google_workspace_credentials`
    secret; record account scope in the `google_workspace` config key.
-4. Tool catalog + read/write split. The server is launched at its `core` tool
-   tier restricted to Gmail / Calendar / Drive — sixteen tools, each classified
-   read vs. write in `skills/google-workspace/scripts/tool_gate.py`. **Reads**
+4. Tool catalog + read/write split. The manifest command launches the server
+   with `--tool-tier core --tools gmail drive calendar`, so it registers only
+   the `core`-tier Gmail / Calendar / Drive tools — sixteen, each classified
+   read vs. write in `skills/google-workspace/scripts/tool_gate.py`. (Without
+   those flags upstream registers every service at every tier — ~60 tools — and
+   the split below would not match what the server exposes.) **Reads**
    (search/list/get mail, events, and Drive files; the existing shareable link)
    have no side effect and auto-approve. **Writes** send mail, create/modify
    calendar events, or write to Drive/local disk — including
@@ -56,11 +59,16 @@ Depends on the `screening` package for that gating.
    card is the one control that survives a clever injection. Do **not** add a
    write tool to `gate.approved` or replace this allowlist posture with a
    denylist — denial must stay explicit (a tool that nobody allowlisted must
-   still card). The heavier `screening` classification wiring is a separate
-   concern (TODO(#5)); it layers on top of — it does not replace — this card.
-6. Pin + patch the upstream server. TODO(#7): finalize and pin the exact `uvx`
-   launch command (currently the well-formed placeholder `uvx workspace-mcp`)
-   and record any local patch.
+   still card). **Never add a `"*"` entry to `gate.approved`**: core's
+   `GatePolicy.decide` treats `"*"` as approve-all, so a single wildcard silently
+   auto-approves every write and defeats the entire card posture. The heavier
+   `screening` classification wiring is a separate concern (TODO(#5)); it layers
+   on top of — it does not replace — this card.
+6. Pin + patch the upstream server. The command already carries the tool-tier /
+   service restriction (`uvx workspace-mcp --tool-tier core --tools gmail drive
+   calendar`); TODO(#7): pin the exact `workspace-mcp` version and record any
+   local patch. Do **not** drop the `--tool-tier` / `--tools` flags when pinning
+   — they are what makes the read/write split above real.
 7. Record it: add a `google-workspace` entry to `data/installed.yaml`.
    TODO(#9): define the version stamp written here.
 8. `restart` — the done-check runs and the server goes live.

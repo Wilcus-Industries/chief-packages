@@ -125,6 +125,8 @@ TODO(#5): the heavier `screening` classification wiring layers on top of this ca
 
 - Owner consent + OAuth credentials live in the `google_workspace_credentials`
   secret. TODO(#8).
-- The server launches via a pinned `uvx` command. TODO(#7): the finalized,
-  pinned launch command (placeholder today: `uvx workspace-mcp`).
+- The server launches via `uvx workspace-mcp --tool-tier core --tools gmail
+  drive calendar`, so only the `core`-tier Gmail / Calendar / Drive tools are
+  registered (without the flags upstream exposes every service at every tier).
+  TODO(#7): pin the exact `workspace-mcp` version; keep the tier/service flags.
 - Version + uninstall bookkeeping. TODO(#9).
