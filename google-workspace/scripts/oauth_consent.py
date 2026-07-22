@@ -112,6 +112,14 @@ _UNIVERSE_DOMAIN = "googleapis.com"
 _STATE_BYTES = 32
 _VERIFIER_BYTES = 64
 
+# A pending consent session (state + PKCE verifier) is exchangeable only within
+# this window of being issued. A much-older paste is refused: a `url` run and
+# forgotten cannot be exchanged out of the blue days later. It binds only the
+# owner's own consent (no fixation), but bounding the lifetime is cheap
+# defense-in-depth. One hour comfortably covers "open the URL on my phone,
+# consent, paste it back".
+_PENDING_STATE_TTL = timedelta(hours=1)
+
 # Loopback / out-of-band redirects a Desktop-app OAuth client legitimately uses.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _OOB_REDIRECT = "urn:ietf:wg:oauth:2.0:oob"
@@ -132,6 +140,12 @@ class RedirectParseError(OAuthError):
 class StateMismatchError(OAuthError):
     """The pasted redirect's ``state`` does not match the state issued for this
     account — a forged, injected, or cross-session consent."""
+
+
+class ExpiredConsentError(OAuthError):
+    """The pending consent session is older than ``_PENDING_STATE_TTL`` — a
+    ``url`` that was issued but never exchanged in time. Re-run ``url`` to start
+    a fresh session."""
 
 
 class TokenExchangeError(OAuthError):
@@ -295,7 +309,14 @@ def build_consent_url(
     _ensure_credentials_dir(credentials_dir)
     _write_secret_json(
         pending_state_path(acct, credentials_dir),
-        {"account": acct, "state": state, "code_verifier": code_verifier},
+        {
+            "account": acct,
+            "state": state,
+            "code_verifier": code_verifier,
+            # Bounds the session lifetime — a stale paste is refused in
+            # ``consume_pending_state`` (see ``_PENDING_STATE_TTL``).
+            "issued_at": datetime.now(UTC).isoformat(),
+        },
     )
     params = {
         "client_id": client.client_id,
@@ -473,6 +494,35 @@ def pending_state_path(
     return Path(credentials_dir) / f".{_normalize_account(account)}.pending.json"
 
 
+def _parse_issued_at(value: str) -> datetime | None:
+    """Parse a pending session's ``issued_at`` ISO timestamp, or ``None`` if it
+    is unparseable. A naive timestamp is assumed UTC (what we write)."""
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+def _require_fresh_pending(account: str, raw: object) -> None:
+    """Refuse a pending consent session with no readable issue time or one older
+    than ``_PENDING_STATE_TTL`` — fail closed rather than exchange a stale (or
+    issue-time-stripped) session."""
+    issued = raw.get("issued_at") if isinstance(raw, dict) else None
+    ts = _parse_issued_at(issued) if isinstance(issued, str) else None
+    if ts is None:
+        raise ExpiredConsentError(
+            f"pending consent for {account!r} has no readable issue time — "
+            f"re-run `url {account}` to start a fresh session"
+        )
+    if datetime.now(UTC) - ts > _PENDING_STATE_TTL:
+        raise ExpiredConsentError(
+            f"pending consent for {account!r} expired (issued {issued}, older "
+            f"than {_PENDING_STATE_TTL}) — re-run `url {account}` and paste back "
+            "that session's redirect"
+        )
+
+
 def consume_pending_state(
     account: str,
     provided_state: str | None,
@@ -485,7 +535,8 @@ def consume_pending_state(
     A missing pending file, a blank/absent pasted state, or any mismatch raises
     ``StateMismatchError`` — this is the guard that stops a redirect from a
     *different* consent session (a phished paste) from being exchanged and bound
-    under the owner's key. The comparison is constant-time.
+    under the owner's key. The comparison is constant-time. A session older than
+    ``_PENDING_STATE_TTL`` is refused with ``ExpiredConsentError``.
     """
     acct = _normalize_account(account)
     path = pending_state_path(acct, credentials_dir)
@@ -500,12 +551,17 @@ def consume_pending_state(
         raise StateMismatchError(
             f"cannot read pending consent for {acct!r}: {exc}"
         ) from exc
+    _require_fresh_pending(acct, raw)
     expected = raw.get("state") if isinstance(raw, dict) else None
     if (
         not provided_state
         or not isinstance(expected, str)
         or not expected
-        or not hmac.compare_digest(provided_state, expected)
+        # Byte-based: ``hmac.compare_digest`` raises TypeError on a non-ASCII
+        # str, so a paste whose state decodes to non-ASCII would escape as an
+        # unhandled traceback (``main`` catches only OAuthError/ValueError).
+        # Comparing the UTF-8 encodings fails closed cleanly instead.
+        or not hmac.compare_digest(provided_state.encode(), expected.encode())
     ):
         raise StateMismatchError(
             "the redirect's state does not match the state issued for this "
@@ -610,6 +666,12 @@ def _decode_jwt_email(id_token: str) -> str | None:
     Decodes the base64url payload segment WITHOUT verifying the signature — safe
     here only because the id_token is delivered by the trusted token endpoint
     (see ``_require_granted_email``); JWKS signature verification is #10.
+
+    NOTE: this reads ``email`` but does not yet require ``email_verified: true``.
+    Google's guidance is to trust the claim only when verified; enforcing that is
+    deliberately folded into #10's JWKS signature-verification work (it only
+    matters given a state/PKCE bypass plus an attacker-held Google account, so it
+    is defense-in-depth on top of the anti-fixation check, not a live gap here).
     """
     parts = id_token.split(".")
     if len(parts) < 2 or not parts[1]:
