@@ -152,12 +152,52 @@ async def screen_gmail(
     return None
 
 
+def _register_auth_amplifier(context: Any, hooks: Any) -> None:
+    """Wire the broken-auth amplifier (#9) too.
+
+    The manifest gives a package ONE ``hooks:`` entry point, so this registrar is
+    also where the package's other ``post_tool`` hook — the broken-credential
+    amplifier in ``auth_failure.py`` — is wired. The boot loader execs this module
+    by file path without putting its dir on ``sys.path``, so the sibling is loaded
+    the same way — :func:`importlib.util.spec_from_file_location`, the mechanism
+    core's boot loader uses — rather than a permanent daemon-wide
+    ``sys.path.insert`` (which would leak the scripts dir front-of-path and let the
+    generic ``auth_failure`` name collide with anything else). A failure here must
+    not sink the Gmail screen, so it is contained and logged rather than raised.
+    """
+    import importlib.util
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    auth_path = os.path.join(here, "auth_failure.py")
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "chief_pkg_google_workspace_auth_failure", auth_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load auth amplifier at {auth_path}")
+        auth_failure = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(auth_failure)
+
+        auth_failure.register(context, hooks)
+    except Exception:
+        logger.error(
+            "google-workspace broken-auth amplifier failed to register; a broken "
+            "credential will still error (the raw tool error is not withheld) but "
+            "without the loud re-auth notice",
+            exc_info=True,
+        )
+
+
 def register(context: Any, hooks: Any) -> None:
     """Wire the inbound-Gmail post_tool screen. Called by the boot hook loader.
 
     ``context.classifier`` is the same primitive monitors use; the guard-model
-    prompt lives in the owner-editable classifier def, not in this code.
+    prompt lives in the owner-editable classifier def, not in this code. This is
+    also the package's single hook registrar, so it wires the broken-auth
+    amplifier (#9, ``auth_failure.py``) alongside the screen.
     """
+    _register_auth_amplifier(context, hooks)
     classifier = context.classifier
 
     # Boot-time check: if the classifier def was never seeded or was deleted,

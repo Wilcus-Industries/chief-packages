@@ -1,16 +1,27 @@
 # Installing google-workspace
 
-> **Stub.** This slice adds the manifest, its test harness, the alias-helper
-> install wiring (step 1), the consent-by-paste OAuth flow (step 3, #8), the gate
-> posture (steps 4–5: the read/write tool split and the write-gate registration),
-> and the pinned + patched + warmed upstream server (step 6, #7). The remaining
-> bookkeeping (step 7) is stubbed with a `TODO(#9)` pointer. Do not treat it as
-> complete yet.
-
 Gmail, Calendar, and Drive for chief, via a pinned upstream Google Workspace
 MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp),
 PyPI `workspace-mcp`) launched over stdio. Reads are open; writes are gated.
 Depends on the `screening` package for that gating.
+
+## Install-time questions — ask both, explicitly
+
+The install conversation must ask the owner these two things and record the
+answers, so the flow is predictable and nothing is assumed silently:
+
+1. **Assistant-signature on outbound mail?** Should mail this package sends on
+   the owner's behalf carry a short assistant-signature disclosure (e.g. a
+   trailer noting it was sent by the owner's assistant)? Default: **ask the
+   owner**; do not add one silently. If yes, add the agreed trailer text to the
+   `google_workspace` config and have the skill append it to every composed
+   message before the send gate (the send still cards either way). If no, the
+   owner is choosing to send unsigned — record that so it is a decision, not an
+   omission.
+2. **How does the deterministic version check run?** A **chief prompt-schedule**
+   (portable) or an **OS-level timer** (fully LLM-free) — see step 8. Pick the
+   one that fits the host; the check script is identical, only the wiring
+   differs.
 
 1. Run `bash data/packages/google-workspace/install.sh` with the `shell` tool.
    It copies the skill and the bundled `gw_aliases.py` to
@@ -144,6 +155,66 @@ Depends on the `screening` package for that gating.
    - The live MCP-over-stdio connection to a real Google account (which also
      exercises the OAuth grant, step 3) is validated in **#10**; this slice
      lands + proves the patch offline.
-7. Record it: add a `google-workspace` entry to `data/installed.yaml`.
-   TODO(#9): define the version stamp written here.
-8. `restart` — the done-check runs and the server goes live.
+7. Record it: `uv run python -m chief.registry_apply google-workspace --source
+   cloned` adds the `google-workspace` entry to `data/installed.yaml` (the record
+   the boot loader reads to load this package's hooks — the inbound-Gmail screen
+   **and** the broken-auth amplifier, step 8). Pass `--source cloned` because this
+   package is cloned from chief-packages, not bundled with core; the recorded
+   source drives which update path applies, so the default `bundled` would be
+   wrong here. **The version stamp is the pin, not a
+   separate field.** `patches/upstream.pin` (tag + commit) is the single source
+   of truth for which upstream release is installed; the deterministic version
+   check reads it directly, and uninstall reconciles against it — so there is no
+   duplicate version to drift. Bumping the server means editing that pin (step
+   6), never hand-editing `data/installed.yaml`.
+8. **Broken authorization fails loud and stays down (default).** When a refresh
+   token is revoked, consent expires, or a quota is exhausted, every Google tool
+   must **error visibly and stay registered** — a capability that silently
+   vanishes is one the owner keeps assuming they have. This is wired as a
+   `post_tool` amplifier (`scripts/auth_failure.py`, registered alongside the
+   inbound screen via the manifest `hooks:` block): a Google tool result carrying
+   a broken-credential signal is annotated with a prominent, actionable re-auth
+   notice, the original error kept below it. Nothing is dropped or deregistered.
+   The verbosity is configurable, **loud by default**:
+   ```yaml
+   google_workspace:
+     auth_failure_mode: loud   # loud (default) | quiet
+   ```
+   `quiet` is terser but never silent (an unrecognized value falls back to
+   `loud`). Detecting a **live** revoked Google credential is exercised in #10;
+   the mapping, the config switch, and the default are live now. On a broken-auth
+   error, re-authorize the affected account with the consent-by-paste flow
+   (step 3).
+9. **Deterministic upstream version check (no model turn).** A newer upstream
+   release should reach the owner as a notification, so the pin can be bumped
+   deliberately (step 6) — the server holds a Gmail send credential, so nothing
+   updates automatically. The **outcome** is `scripts/version_check.py check`:
+   it reads `patches/upstream.pin`, asks GitHub for the repo's latest **stable**
+   release, compares tags, and — only when a newer release exists — prints a
+   notification to stdout and exits `10` (up to date → exit `0`, error → exit
+   `2`). The comparison is purely deterministic; no LLM is in the path. **Wire it
+   as a platform-chosen outcome, not a fixed recipe** (the install-time question
+   above):
+   - **OS-level timer (fully LLM-free — prefer where available).** A launchd
+     `StartCalendarInterval` job, a systemd timer, or a `cron` entry runs
+     `uv run python skills/google-workspace/scripts/version_check.py check` on a
+     cadence (e.g. weekly) and, on exit `10`, pipes stdout to the platform
+     notifier (`osascript`/`notify-send`) or an owner-watched log. No model ever
+     runs.
+   - **Chief prompt-schedule (portable).** With the `schedule` tool, create a
+     prompt schedule (e.g. `spec: "0 14 * * 1"`) whose prompt is: *run the shell
+     command `uv run python skills/google-workspace/scripts/version_check.py
+     check` and, if it prints a notification, relay it to me verbatim.* The
+     comparison still happens entirely in the script — the agent does no version
+     reasoning, it only relays the verdict.
+
+   **Verify the wiring works** before trusting it: run the check by hand now and
+   confirm it exits `0` (you are up to date on the fresh pin):
+   ```
+   uv run python skills/google-workspace/scripts/version_check.py check
+   ```
+   To confirm it *would* notify on a newer release, point it at a saved fixture
+   (any JSON with a higher `"tag_name"`) via `--releases-endpoint`, or copy the
+   pin to a temp file with an older `UPSTREAM_TAG` and pass `--pin` — it should
+   print the notification and exit `10`.
+10. `restart` — the done-check runs, the hooks load, and the server goes live.
