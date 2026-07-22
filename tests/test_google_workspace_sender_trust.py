@@ -15,6 +15,7 @@ from textwrap import dedent
 from sender_trust import (
     Action,
     SenderTrustCatalog,
+    _strip_comments,
     parse_authentication_results,
     resolve_sender,
     verified_sender,
@@ -454,3 +455,50 @@ def test_shared_domain_spf_no_dmarc_routes_to_owner_confirm() -> None:
     assert decision.verified_sender is None
     assert decision.tier is None
     assert decision.action is Action.OWNER_CONFIRM
+
+
+# DKIM-only authentication (no SPF smtp.mailfrom), domain-level header.i.
+DKIM_DOMAIN_ONLY = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: hi
+    Date: Mon, 21 Jul 2026 09:30:00 -0700
+    Message-ID: <dkim-only-1@example.com>
+    Authentication-Results: mx.google.com;
+        dkim=pass header.i=@example.com header.s=sel;
+        dmarc=pass header.from=example.com
+    """
+)
+
+
+def test_dkim_domain_only_identity_is_domain_level() -> None:
+    # DKIM header.i is domain-level, so the verified identity is the domain,
+    # not a specific mailbox (#13.1).
+    assert verified_sender(DKIM_DOMAIN_ONLY) == "@example.com"
+
+
+def test_dkim_domain_identity_matches_domain_catalog_not_per_address() -> None:
+    # A DKIM-domain-only sender matches a domain-level catalog entry but NOT a
+    # per-address entry — DKIM alone must not silently match a mailbox (#13.1).
+    by_domain = resolve_sender(
+        DKIM_DOMAIN_ONLY, SenderTrustCatalog({"@example.com": "trusted"})
+    )
+    assert by_domain.action is Action.ALLOW
+    assert by_domain.tier == "trusted"
+
+    by_address = resolve_sender(
+        DKIM_DOMAIN_ONLY, SenderTrustCatalog({"alice@example.com": "trusted"})
+    )
+    assert by_address.action is Action.OWNER_CONFIRM
+    assert by_address.tier is None
+
+
+def test_strip_comments_honors_quoted_string() -> None:
+    # A '(' inside a quoted-string is a literal, not a comment opener; a real
+    # trailing comment is still stripped (#13.2).
+    assert _strip_comments('x="a(b)c" (real comment)') == 'x="a(b)c" '
+    # A quoted '"' inside a comment does not start a quoted-string.
+    assert _strip_comments("keep (drop \" this) tail") == "keep  tail"
+    # Backslash-escaped quote inside a quoted-string stays inside the quote.
+    assert _strip_comments('v="a\\"b(c)" z') == 'v="a\\"b(c)" z'

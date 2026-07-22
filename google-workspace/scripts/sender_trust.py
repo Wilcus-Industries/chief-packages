@@ -109,19 +109,43 @@ class AuthResult:
 
 
 def _strip_comments(value: str) -> str:
-    """Drop RFC-822 ``(...)`` comments, honouring nesting.
+    """Drop RFC 5322 ``(...)`` comments, honouring nesting and quoted-strings.
 
     Comments carry free text (``spf=pass (google.com: domain of …)``) that would
-    otherwise be tokenised as bogus properties."""
+    otherwise be tokenised as bogus properties. A ``(`` inside a quoted-string
+    (``smtp.mailfrom="a(b)@example.com"``) is a literal, not a comment opener,
+    so quoting suspends comment recognition; backslash quoted-pairs are honoured
+    in both contexts (RFC 5322 §3.2.1–3.2.3)."""
     out: list[str] = []
     depth = 0
-    for ch in value:
-        if ch == "(":
+    in_quote = False
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i]
+        if in_quote:
+            if ch == "\\" and i + 1 < n:  # quoted-pair: next char is literal
+                if depth == 0:
+                    out.append(ch)
+                    out.append(value[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_quote = False
+            if depth == 0:
+                out.append(ch)
+        elif ch == '"' and depth == 0:  # a comment may hold '"'; only open at depth 0
+            in_quote = True
+            out.append(ch)
+        elif ch == "(":
             depth += 1
         elif ch == ")":
             depth = max(0, depth - 1)
+        elif ch == "\\" and depth != 0 and i + 1 < n:  # quoted-pair inside a comment
+            i += 2
+            continue
         elif depth == 0:
             out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -239,6 +263,17 @@ def verified_sender(
 
     SPF's ``smtp.mailfrom`` (a full envelope address) is preferred over DKIM
     (often domain-only).
+
+    **DKIM identity granularity.** When only DKIM authenticates, the identity
+    comes from ``header.i`` / ``header.d``. ``header.i`` is commonly domain-level
+    (``@example.com``), which normalises to ``@example.com`` — a *domain*
+    identity. The catalog keys on whatever string is returned, so a domain
+    identity matches a domain-level catalog entry (a key of ``@example.com``) but
+    **never** a per-address entry (``alice@example.com``): a DKIM-domain-only
+    sender therefore falls through to ``OWNER_CONFIRM`` unless the owner
+    catalogs the domain itself. That is the safe direction — DKIM alone does not
+    authenticate a specific mailbox, so it must not silently match one. A full
+    ``header.i`` (``alice@example.com``) matches a per-address entry as usual.
     """
     results = parse_authentication_results(raw_message, trusted_authserv_id)
     spf = _verdict(results, _SPF)
