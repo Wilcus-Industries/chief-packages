@@ -1,10 +1,10 @@
 # Installing google-workspace
 
 > **Stub.** This slice adds the manifest, its test harness, the alias-helper
-> install wiring (step 1), and the gate posture (steps 4–5: the read/write tool
-> split and the write-gate registration). The remaining steps are stubbed with
-> `TODO(#N)` pointers to the slices that build them out. Do not treat the OAuth,
-> server-pin, or bookkeeping steps as complete yet.
+> install wiring (step 1), the gate posture (steps 4–5: the read/write tool split
+> and the write-gate registration), and the pinned + patched + warmed upstream
+> server (step 6, #7). The OAuth (step 3) and bookkeeping (step 7) steps are
+> still stubbed with `TODO(#N)` pointers. Do not treat those as complete yet.
 
 Gmail, Calendar, and Drive for chief, via a pinned upstream Google Workspace
 MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp),
@@ -19,7 +19,12 @@ Depends on the `screening` package for that gating.
    classifier into `classifiers/gmail-inbound-screen.md` (never clobbered; pass
    `GATE_MODEL=<model-id>` to pin a guard model other than the default
    `openai/gpt-4.1-nano` — the value must be a plain model id, characters
-   outside `[A-Za-z0-9._:/-]` are rejected).
+   outside `[A-Za-z0-9._:/-]` are rejected). It then runs
+   `scripts/setup_upstream.sh` (step 6): clones the **pinned** upstream MCP
+   server to `data/google-workspace/server`, applies the auth-result-header
+   patch, and warms its deps. That step **fails loud** (aborts the install) if
+   the patch does not apply; set `GW_SKIP_WARM=1` to skip only the `uv sync`
+   warm on an offline box.
 2. Install `screening` first if it isn't already — writes route through it, and
    inbound Gmail content is screened before the model reads it. That screen is
    the manifest's `hooks:` block (`scripts/gmail_screen.py`): a `post_tool` hook
@@ -74,11 +79,35 @@ Depends on the `screening` package for that gating.
    auto-approves every write and defeats the entire card posture. The heavier
    `screening` classification wiring is a separate concern (TODO(#5)); it layers
    on top of — it does not replace — this card.
-6. Pin + patch the upstream server. The command already carries the tool-tier /
-   service restriction (`uvx workspace-mcp --tool-tier core --tools gmail drive
-   calendar`); TODO(#7): pin the exact `workspace-mcp` version and record any
-   local patch. Do **not** drop the `--tool-tier` / `--tools` flags when pinning
-   — they are what makes the read/write split above real.
+6. Pin + patch + warm the upstream server (done by `install.sh`, which runs
+   `scripts/setup_upstream.sh`). The exact release is pinned in
+   `patches/upstream.pin` (tag **v1.22.0**, commit
+   `6e1d1457746777f8512f52d40fb195b2a40bad36`) — never a moving branch, because
+   the server holds a Gmail send credential. Setup clones that commit to
+   `data/google-workspace/server`, verifies the checked-out HEAD equals the pin,
+   applies `patches/0001-authentication-results-headers.patch`, and warms deps
+   with `uv sync`. The manifest launch runs that patched checkout via `uv run
+   --frozen --directory data/google-workspace/server workspace-mcp --tool-tier
+   core --tools gmail drive calendar` — the pinned, warmed lockfile means the
+   first stdio connect never races a dependency resolution.
+   - **The patch is REQUIRED and the apply is fail-loud.** It adds the message's
+     `Authentication-Results` header(s) to the Gmail read output. Without it the
+     sender-trust catalog (#4, `scripts/sender_trust.py`) has nothing to verify,
+     so it can never verify **any** sender — the catalog never falls back to the
+     forgeable `From`; a missing AR header just fails closed and routes every
+     message to owner-confirm, leaving the feature broken. That is why a
+     non-applying patch is a HARD ERROR that aborts the install
+     (`scripts/apply_upstream_patch.sh`), never a warning. Re-generate the patch
+     if you bump the pin. The patch is offered upstream; once merged, delete it
+     and bump the pin in the same change (setup then verifies the mechanism is
+     already present in the tree and applies nothing — a lost patch file with the
+     mechanism absent still hard-fails).
+   - Do **not** drop the `--tool-tier` / `--tools` flags — they scope the surface
+     to core-tier Gmail/Calendar/Drive (a bare launch registers every service at
+     every tier, ~60 tools) and are what makes the read/write split above real.
+   - The live MCP-over-stdio connection to a real Google account (which also
+     exercises the OAuth grant, step 3) is validated in **#10**; this slice
+     lands + proves the patch offline.
 7. Record it: add a `google-workspace` entry to `data/installed.yaml`.
    TODO(#9): define the version stamp written here.
 8. `restart` — the done-check runs and the server goes live.

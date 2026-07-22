@@ -5,8 +5,10 @@
 # inbound-Gmail screening classifier (#5). The post-tool screening hook itself is
 # registered by the boot loader from the manifest's `hooks:` block once the
 # package is recorded in data/installed.yaml (INSTALL.md step 7) — no copy needed,
-# the loader reads the cloned package dir. The MCP server version pin and the
-# OAuth grant are still separate slices (INSTALL.md TODO(#7)/(#8)/(#9)), not here.
+# the loader reads the cloned package dir. This script ALSO clones the pinned
+# upstream MCP server, applies the auth-result-header patch (fail-loud), and
+# warms its deps (setup_upstream.sh, #7). The OAuth grant is still a separate
+# slice (INSTALL.md TODO(#8)/(#9)), not here.
 #
 # Parameters (env):
 #   GATE_MODEL   model id for the inbound-Gmail screening classifier, chosen at
@@ -73,3 +75,13 @@ if [ ! -f "$aliases" ]; then
 #   personal: me@gmail.com
 EOF
 fi
+
+# Pin + patch + warm the upstream MCP server (#7). Clones the exact commit in
+# patches/upstream.pin to data/google-workspace/server, applies the auth-result-
+# header patch, and warms deps. FAILS LOUD (set -e aborts the install) if the
+# patch does not apply — a server that omits Authentication-Results leaves the
+# sender-trust catalog unable to verify any sender (it never falls back to the
+# forgeable From), so every message fails closed to owner-confirm and the feature
+# is broken. Set GW_SKIP_WARM=1 to skip the `uv sync` warm on an offline box
+# (patch still runs).
+bash "$here/scripts/setup_upstream.sh"

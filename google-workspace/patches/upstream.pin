@@ -1,0 +1,14 @@
+# Pinned upstream Google Workspace MCP server.
+#
+# This server holds a Gmail *send* credential, so it is NEVER run off a moving
+# branch: the exact release tag AND its commit SHA are pinned here and cloned at
+# that commit by setup_upstream.sh. Bumping the pin is a deliberate edit — bump
+# the tag + SHA together, re-generate patches/0001-*.patch against the new tree
+# (the install FAILS LOUD if the patch no longer applies), and re-run install.
+#
+# Sourced by scripts/setup_upstream.sh and scripts/apply_upstream_patch.sh, and
+# asserted by tests/test_google_workspace_upstream_patch.py — keep it a plain
+# `KEY=value` file (no spaces around `=`, values safe to eval in POSIX sh).
+UPSTREAM_REPO=https://github.com/taylorwilsdon/google_workspace_mcp
+UPSTREAM_TAG=v1.22.0
+UPSTREAM_COMMIT=6e1d1457746777f8512f52d40fb195b2a40bad36
