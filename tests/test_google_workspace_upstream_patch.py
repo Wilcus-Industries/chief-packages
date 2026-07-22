@@ -210,7 +210,7 @@ def _segment(
     for node in tree.body:
         if (
             want_func is not None
-            and isinstance(node, ast.FunctionDef)
+            and isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
             and node.name == want_func
         ) or (
             want_assign is not None
@@ -449,3 +449,88 @@ def test_zero_patches_ok_when_mechanism_already_present(
     result = _apply_with_empty_patches_dir(clone, tmp_path, "present")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "merged upstream" in (result.stdout + result.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# Read/write classification vs the pinned upstream (#6 gate posture)          #
+# --------------------------------------------------------------------------- #
+#
+# tool_gate.py splits the core-tier tools read (auto-approve) vs write (card).
+# The most load-bearing READ is get_drive_shareable_link — a share-shaped name
+# that would be a WRITE if it mutated sharing state, but is a READ because it
+# only reports the *existing* links + permissions via files().get. That claim
+# was classified on the docstring alone with no test pinning it against the
+# real upstream; these tests close that gap by parsing the actual pinned source.
+
+
+def _drive_tools_src(server: Path) -> str:
+    return (server / "gdrive" / "drive_tools.py").read_text()
+
+
+def _called_method_names(func_src: str) -> set[str]:
+    """The attribute names *called* inside a function body (``x.foo()`` → ``foo``).
+
+    AST-based on purpose: a Drive ``fields=`` argument is a *string literal* like
+    ``"permissions(id, type, role)"``, which a substring scan would misread as a
+    ``permissions()`` call. Only real ``ast.Call`` nodes count here."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(func_src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            names.add(node.func.attr)
+    return names
+
+
+# Drive REST verbs that mutate remote state (create/modify/remove). A read tool's
+# body must call none of these — on files() or permissions().
+_DRIVE_MUTATION_VERBS = frozenset({"create", "update", "delete", "patch", "insert"})
+
+
+def test_shareable_link_reads_only_no_sharing_mutation(
+    pristine_upstream: Path,
+) -> None:
+    """get_drive_shareable_link is classified READ (auto-approve) — prove against
+    the pinned upstream that its body only *reads* sharing state (files().get) and
+    calls no mutating Drive verb, so the READ classification cannot silently drift
+    into auto-approving a share on a pin bump."""
+    from tool_gate import READ_TOOLS
+
+    assert "get_drive_shareable_link" in READ_TOOLS
+
+    src = _segment(
+        _drive_tools_src(pristine_upstream), want_func="get_drive_shareable_link"
+    )
+    called = _called_method_names(src)
+
+    assert "get" in called, "shareable-link read must fetch metadata via files().get"
+    mutating = called & _DRIVE_MUTATION_VERBS
+    assert not mutating, (
+        "get_drive_shareable_link is classified READ but its pinned-upstream body "
+        f"calls mutating Drive verb(s) {sorted(mutating)} — reclassify to WRITE in "
+        "tool_gate.WRITE_TOOLS"
+    )
+
+
+def test_catalog_tool_names_exist_in_pinned_upstream(pristine_upstream: Path) -> None:
+    """Every Gmail/Drive/Calendar tool tool_gate classifies is a real function
+    name in the pinned upstream — so a rename on a pin bump can't leave a governed
+    tool silently ungated (its gated name would never match anything)."""
+    from tool_gate import ALL_TOOLS
+
+    src_by_service = {
+        "gmail": (pristine_upstream / "gmail" / "gmail_tools.py").read_text(),
+        "gdrive": _drive_tools_src(pristine_upstream),
+        "gcalendar": (
+            pristine_upstream / "gcalendar" / "calendar_tools.py"
+        ).read_text(),
+    }
+    defined: set[str] = set()
+    for source in src_by_service.values():
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                defined.add(node.name)
+
+    missing = {t for t in ALL_TOOLS if t not in defined}
+    assert not missing, (
+        f"tool_gate governs tool name(s) absent from the pinned upstream: "
+        f"{sorted(missing)} — a rename would leave them ungated"
+    )
