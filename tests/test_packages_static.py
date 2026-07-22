@@ -20,6 +20,17 @@ def _discover_manifests() -> list[Path]:
     return sorted(repo_root().glob("*/manifest.yaml"))
 
 
+def _skill_within_package(manifest_path: Path, entry: str) -> bool:
+    """True iff a ``skills:`` entry resolves inside its own package dir.
+
+    This repo later becomes an install source, so an entry like
+    ``../other-pkg/skills/x`` reaching outside the package is rejected.
+    """
+    pkg_dir = manifest_path.parent.resolve()
+    skill_dir = (manifest_path.parent / entry).resolve()
+    return skill_dir == pkg_dir or pkg_dir in skill_dir.parents
+
+
 MANIFESTS = _discover_manifests()
 
 
@@ -51,6 +62,13 @@ def test_manifest_is_well_formed(manifest_path: Path) -> None:
     if skills:
         assert isinstance(skills, list)
         for entry in skills:
+            # A declared skill must live inside its own package dir (this repo
+            # later becomes an install source — a ``../other-pkg/...`` entry is
+            # rejected, not silently accepted).
+            assert _skill_within_package(manifest_path, str(entry)), (
+                f"{manifest_path}: declared skill '{entry}' resolves outside "
+                "the package dir"
+            )
             skill_dir = manifest_path.parent / str(entry)
             assert skill_dir.is_dir(), (
                 f"{manifest_path}: declared skill '{entry}' not found on disk"
@@ -73,3 +91,14 @@ def test_manifest_mcp_servers_validate(
 
     problems = validate_mcp_servers(manifest_path, servers)
     assert problems == [], f"{manifest_path}: {problems}"
+
+
+def test_skill_within_package_rejects_escape(tmp_path: Path) -> None:
+    manifest = tmp_path / "pkg" / "manifest.yaml"
+    manifest.parent.mkdir(parents=True)
+    (tmp_path / "other" / "skills" / "x").mkdir(parents=True)
+    (manifest.parent / "skills" / "own").mkdir(parents=True)
+
+    assert _skill_within_package(manifest, "skills/own")
+    assert not _skill_within_package(manifest, "../other/skills/x")
+    assert not _skill_within_package(manifest, "/etc")
