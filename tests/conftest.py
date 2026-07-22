@@ -93,9 +93,13 @@ def _ensure_core_on_path() -> bool:
     return True
 
 
-# Resolve + wire the core loader at import time so ``import chief.mcp_manifest``
-# works in every test module that follows.
-CORE_AVAILABLE: bool = _ensure_core_on_path()
+# Set by ``pytest_configure`` (before collection, so ``import chief.mcp_manifest``
+# / ``import gw_aliases`` in test modules resolve). Wiring runs in the hook, not
+# at import time, so ``_resolve_core``'s fail-loud ``pytest.exit`` produces a
+# clean one-line message with an honored exit code — an import-time exit is
+# wrapped in ``ConftestImportFailure`` and reported as USAGE_ERROR(4) with a
+# traceback, discarding the ``returncode``.
+CORE_AVAILABLE: bool = False
 
 
 def _package_scripts_on_path(package: str) -> None:
@@ -114,14 +118,19 @@ def _package_scripts_on_path(package: str) -> None:
             sys.path.insert(0, src)
 
 
-_package_scripts_on_path("google-workspace")
+def pytest_configure(config: pytest.Config) -> None:
+    """Wire core + package scripts onto ``sys.path`` before collection.
+
+    Runs after conftest import but before any test module is collected, so the
+    top-level ``import chief.mcp_manifest`` / ``import gw_aliases`` in the test
+    modules still resolve — and ``_resolve_core``'s fail-loud ``pytest.exit``
+    now fires from a hook (honored exit code, no ``ConftestImportFailure``).
+    """
+    global CORE_AVAILABLE
+    CORE_AVAILABLE = _ensure_core_on_path()
+    _package_scripts_on_path("google-workspace")
 
 
 @pytest.fixture
 def core_available() -> bool:
     return CORE_AVAILABLE
-
-
-@pytest.fixture
-def packages_root() -> Path:
-    return repo_root()
