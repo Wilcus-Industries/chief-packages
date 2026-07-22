@@ -158,19 +158,26 @@ def _register_auth_amplifier(context: Any, hooks: Any) -> None:
     The manifest gives a package ONE ``hooks:`` entry point, so this registrar is
     also where the package's other ``post_tool`` hook — the broken-credential
     amplifier in ``auth_failure.py`` — is wired. The boot loader execs this module
-    by file path without putting its dir on ``sys.path``, so a sibling import
-    needs that dir added first (idempotent; the same way ``conftest`` reaches these
-    scripts in tests). A failure here must not sink the Gmail screen, so it is
-    contained and logged rather than raised.
+    by file path without putting its dir on ``sys.path``, so the sibling is loaded
+    the same way — :func:`importlib.util.spec_from_file_location`, the mechanism
+    core's boot loader uses — rather than a permanent daemon-wide
+    ``sys.path.insert`` (which would leak the scripts dir front-of-path and let the
+    generic ``auth_failure`` name collide with anything else). A failure here must
+    not sink the Gmail screen, so it is contained and logged rather than raised.
     """
+    import importlib.util
     import os
-    import sys
 
     here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
+    auth_path = os.path.join(here, "auth_failure.py")
     try:
-        import auth_failure
+        spec = importlib.util.spec_from_file_location(
+            "chief_pkg_google_workspace_auth_failure", auth_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load auth amplifier at {auth_path}")
+        auth_failure = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(auth_failure)
 
         auth_failure.register(context, hooks)
     except Exception:

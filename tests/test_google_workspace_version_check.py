@@ -33,11 +33,13 @@ from version_check import (
     VersionCheckError,
     VersionCheckResult,
     check,
+    fetch_latest_release,
     is_newer,
     latest_tag,
     main,
     notification,
     parse_pin,
+    parse_version,
     releases_api_url,
 )
 
@@ -189,6 +191,13 @@ class _FixtureReleases(http.server.BaseHTTPRequestHandler):
         elif type(self).tag == "bad-json":
             self.send_response(200)
             body = b"not json at all"
+        elif type(self).tag == "evil-url":
+            # A newer release whose html_url points OFF github.com — the host
+            # check must refuse to relay it and fall back to the pinned repo.
+            self.send_response(200)
+            body = json.dumps(
+                {"tag_name": "v1.23.0", "html_url": "https://evil.example/pwn"}
+            ).encode()
         else:
             self.send_response(200)
             body = json.dumps(
@@ -322,3 +331,141 @@ def test_main_exit_error_on_bad_pin(
 def test_exit_codes_are_distinct() -> None:
     assert len({EXIT_UP_TO_DATE, EXIT_ERROR, EXIT_NEWER}) == 3
     assert vc.EXIT_UP_TO_DATE == 0
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: the documented ``version_check.py check`` invocation runs the check   #
+# --------------------------------------------------------------------------- #
+
+
+def test_main_bare_check_verb_is_recognized(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The documented ``version_check.py check`` must be a RECOGNIZED command
+    that runs the check — not an argparse "unrecognized arguments" error (exit 2
+    before the check ever runs). With no reachable default pin it fails as a
+    *check* error (exit 2 on stderr as a ``version_check:`` message), proving the
+    verb parsed and the check ran, rather than a usage error."""
+    code = main(["check"])
+    assert code == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "version_check:" in err  # our check-error path…
+    assert "unrecognized arguments" not in err  # …not argparse's usage error
+
+
+def test_main_check_subcommand_detects_newer(
+    releases_endpoint: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _FixtureReleases.tag = "v1.23.0"
+    code = main(
+        ["check", "--pin", str(_pin(tmp_path)), "--releases-endpoint",
+         releases_endpoint]
+    )
+    assert code == EXIT_NEWER
+    assert "v1.23.0" in capsys.readouterr().out
+
+
+def test_main_check_subcommand_up_to_date(
+    releases_endpoint: str, tmp_path: Path
+) -> None:
+    _FixtureReleases.tag = "v1.22.0"
+    code = main(
+        ["check", "--pin", str(_pin(tmp_path)), "--releases-endpoint",
+         releases_endpoint]
+    )
+    assert code == EXIT_UP_TO_DATE
+
+
+def test_main_check_subcommand_error_on_bad_pin(tmp_path: Path) -> None:
+    code = main(["check", "--pin", str(tmp_path / "missing.pin")])
+    assert code == EXIT_ERROR
+
+
+def test_main_rejects_unknown_subcommand() -> None:
+    # An unknown verb is still an argparse usage error (exit 2) — only ``check``
+    # is recognized.
+    with pytest.raises(SystemExit) as exc:
+        main(["bogus"])
+    assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4: a non-numeric upstream tag must not read as "up to date"             #
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_version_rejects_wholly_non_numeric_tag() -> None:
+    with pytest.raises(VersionCheckError, match="no numeric"):
+        parse_version("pwned")
+
+
+def test_is_newer_non_numeric_latest_fails_loud() -> None:
+    # A garbage upstream tag would parse to (0,) and read as *older* → a false
+    # "up to date". It must raise instead.
+    with pytest.raises(VersionCheckError, match="no numeric"):
+        is_newer("pwned", "v1.22.0")
+
+
+def test_check_non_numeric_upstream_tag_fails_loud(
+    releases_endpoint: str, tmp_path: Path
+) -> None:
+    _FixtureReleases.tag = "pwned"
+    with pytest.raises(VersionCheckError, match="no numeric"):
+        check(_pin(tmp_path, "v1.22.0"), endpoint=releases_endpoint)
+
+
+def test_main_non_numeric_tag_exits_error_not_up_to_date(
+    releases_endpoint: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _FixtureReleases.tag = "pwned"
+    code = main(
+        ["check", "--pin", str(_pin(tmp_path)), "--releases-endpoint",
+         releases_endpoint]
+    )
+    assert code == EXIT_ERROR  # NOT EXIT_UP_TO_DATE
+    assert "no numeric" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5: harden the notification data path                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_fetch_rejects_oversize_payload(releases_endpoint: str) -> None:
+    """An unbounded ``read()`` would let a hostile endpoint stream an arbitrarily
+    large body into memory. The fixture body is ~150 bytes; a tiny cap must make
+    it fail loud rather than buffer it."""
+    _FixtureReleases.tag = "v1.22.0"
+    with pytest.raises(VersionCheckError, match="more than"):
+        fetch_latest_release(releases_endpoint, max_bytes=10)
+
+
+def test_notification_sanitizes_and_truncates_hostile_tag() -> None:
+    hostile = "v1.23.0\n<script>alert(1)</script>" + "A" * 200
+    result = VersionCheckResult(
+        repo="https://github.com/o/r",
+        pinned_tag="v1.22.0",
+        latest_tag=hostile,
+        latest_url="https://github.com/o/r/releases",
+        newer=True,
+    )
+    msg = notification(result)
+    assert msg is not None
+    assert "<script>" not in msg  # markup stripped
+    assert "\n" not in msg.split("Review", 1)[0]  # no smuggled newline in the tag
+    assert "…" in msg  # truncated
+
+
+def test_check_refuses_non_github_html_url(
+    releases_endpoint: str, tmp_path: Path
+) -> None:
+    """A hostile ``html_url`` off github.com must not become the "Review <url>"
+    the owner is told to open — the check falls back to the pinned repo."""
+    _FixtureReleases.tag = "evil-url"
+    result = check(_pin(tmp_path, "v1.22.0"), endpoint=releases_endpoint)
+    assert result.newer is True
+    assert "evil.example" not in result.latest_url
+    assert result.latest_url == (
+        "https://github.com/taylorwilsdon/google_workspace_mcp"
+    )
+    assert "evil.example" not in (notification(result) or "")

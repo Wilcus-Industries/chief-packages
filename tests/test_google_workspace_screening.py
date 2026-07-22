@@ -347,3 +347,61 @@ def test_register_is_quiet_when_classifier_def_present(
     # The def exists, so boot is silent — no false alarm — and the hook is wired.
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert registry.post_tool() is not None
+
+
+# --- Fix 2: the broken-auth amplifier reaches production via register() -------
+
+# A revoked-refresh-token error, shaped like google-auth's RefreshError — the
+# broken-credential signal the amplifier (auth_failure.py) fires on.
+REVOKED_CREDENTIAL_ERROR = (
+    "google.auth.exceptions.RefreshError: ('invalid_grant: Token has been "
+    "expired or revoked.', {'error': 'invalid_grant'})"
+)
+
+# A gmail READ tool that is also a google-workspace MCP tool, so BOTH the screen
+# (is_gmail_read) and the amplifier (is_google_workspace_tool) consider it.
+_GMAIL_READ_TOOL = "mcp_google-workspace_search_gmail_messages"
+
+
+def test_gmail_screen_register_wires_broken_auth_amplifier(
+    core_available: bool,
+) -> None:
+    """The amplifier reaches production ONLY through ``gmail_screen.register`` →
+    ``_register_auth_amplifier`` → ``auth_failure.register``; tests that call
+    ``auth_failure.register`` directly bypass this delegation (and its
+    ``except Exception`` swallow). Drive the REAL seam via ``gmail_screen.register``
+    and prove a broken credential is amplified loud with the original error kept —
+    a regression in the glue would drop the notice while shipping green."""
+    _require_core(core_available)
+    # CLEAN screener so only the amplifier annotates — isolates the delegation.
+    classifier = _classifier(_ReplyProvider(CLEAN))
+
+    out = asyncio.run(
+        _run_seam(
+            classifier, _gmail_call(_GMAIL_READ_TOOL), REVOKED_CREDENTIAL_ERROR
+        )
+    )
+
+    assert "AUTHORIZATION IS BROKEN" in out  # loud re-auth notice fired…
+    assert "invalid_grant" in out  # …with the original error kept below it
+    assert FENCE_MARKER not in out  # the screen was clean, so no fence
+
+
+def test_gmail_screen_register_runs_both_hooks_on_one_result(
+    core_available: bool,
+) -> None:
+    """Both post_tool hooks the single registrar wires — the inbound screen AND
+    the broken-auth amplifier — fire on one Gmail read result: a flagged,
+    error-shaped result gets the untrusted fence AND the loud re-auth notice."""
+    _require_core(core_available)
+    classifier = _classifier(_ReplyProvider(FLAGGED))  # flags anything
+
+    out = asyncio.run(
+        _run_seam(
+            classifier, _gmail_call(_GMAIL_READ_TOOL), REVOKED_CREDENTIAL_ERROR
+        )
+    )
+
+    assert FENCE_MARKER in out  # the screen ran (fence present)…
+    assert "AUTHORIZATION IS BROKEN" in out  # …and the amplifier ran too
+    assert "invalid_grant" in out  # original error still kept

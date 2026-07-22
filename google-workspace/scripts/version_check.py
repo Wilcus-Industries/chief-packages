@@ -56,6 +56,21 @@ DEFAULT_PIN_FILE = "data/packages/google-workspace/patches/upstream.pin"
 #: loud "could not check", never a hang.
 DEFAULT_TIMEOUT_SECONDS = 20.0
 
+#: Cap the release-endpoint body. ``tag_name``/``html_url`` are upstream-controlled
+#: and flow into an owner notification, so an unbounded ``read()`` would let a
+#: hostile/garbage release ship a multi-gigabyte body straight into memory. A
+#: release JSON is a few KB; 1 MB is generous headroom and a hard ceiling.
+MAX_RESPONSE_BYTES = 1_000_000
+
+#: The tag is upstream-controlled and is relayed to the owner / piped to
+#: ``notify-send``; truncate it and drop anything outside a version-tag alphabet
+#: before it reaches the notification, so a booby-trapped tag cannot smuggle
+#: control chars or a wall of text into the message.
+MAX_TAG_LEN = 64
+_TAG_SAFE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+:/~-"
+)
+
 # CLI exit codes (see the module docstring).
 EXIT_UP_TO_DATE = 0
 EXIT_ERROR = 2
@@ -131,12 +146,18 @@ def fetch_latest_release(
     *,
     token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     """GET the GitHub latest-release JSON. Raises ``VersionCheckError`` on any
     network / HTTP / decode failure — never returns a partial or empty verdict.
 
     A ``token`` (a GitHub PAT, optional) is sent as a bearer to lift the low
     unauthenticated rate limit; without one the public endpoint still answers.
+
+    The body is read **bounded** (``max_bytes``): the response is upstream-
+    controlled, so an unbounded ``read()`` would let a hostile endpoint stream an
+    arbitrarily large body into memory. Over the cap fails loud, never truncates
+    into a half-parsed verdict.
     """
     headers = {
         "Accept": "application/vnd.github+json",
@@ -149,7 +170,15 @@ def fetch_latest_release(
     request = urllib.request.Request(endpoint, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read().decode()
+            # Read one byte past the cap so an over-size body is detectable
+            # (a body exactly at the cap still fits).
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise VersionCheckError(
+                    f"release endpoint {endpoint} returned more than "
+                    f"{max_bytes} bytes — refusing to buffer an unbounded body"
+                )
+            payload = raw.decode()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:200]
         raise VersionCheckError(
@@ -234,6 +263,15 @@ def parse_version(tag: str) -> _VersionKey:
         core = core[1:]
     core, _, _build = core.partition("+")
     release_part, _, pre = core.partition("-")
+    if not any(ch.isdigit() for ch in release_part):
+        # A wholly non-numeric tag (e.g. "pwned") would otherwise parse to (0,)
+        # and read as *older* than any real pin → a false "up to date" that lets
+        # a compromised/garbage upstream release silently suppress the notice.
+        # Fail loud instead: "could not check", never a false verdict.
+        raise VersionCheckError(
+            f"release tag {tag!r} has no numeric version component — refusing to "
+            "treat a non-numeric/garbage upstream tag as 'up to date'"
+        )
     release = tuple(_int_prefix(seg) for seg in release_part.split(".") if seg)
     return _VersionKey(
         release=release or (0,),
@@ -266,6 +304,30 @@ def is_newer(latest_tag_str: str, pinned_tag: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _safe_url(url: str | None, fallback: str) -> str:
+    """``url`` only if it is a ``github.com`` link, else ``fallback``.
+
+    ``html_url`` is upstream-controlled and the notification tells the owner to
+    "Review <url>", so a hostile release could point it anywhere. Accept it only
+    when it is actually on GitHub; otherwise fall back to the pinned repo URL
+    (owner-controlled, from the pin file)."""
+    if isinstance(url, str) and url:
+        host = urllib.parse.urlsplit(url).hostname
+        if host in {"github.com", "www.github.com"}:
+            return url
+    return fallback
+
+
+def _safe_tag(tag: str) -> str:
+    """A version tag rendered safe for a notification: drop anything outside the
+    tag alphabet (control chars, markup, shell metacharacters → ``?``) and
+    truncate. Only shapes the *display*; comparison uses the raw tag."""
+    cleaned = "".join(ch if ch in _TAG_SAFE_CHARS else "?" for ch in tag)
+    if len(cleaned) > MAX_TAG_LEN:
+        return cleaned[:MAX_TAG_LEN] + "…"
+    return cleaned
+
+
 @dataclass(frozen=True)
 class VersionCheckResult:
     """The deterministic verdict: is the installed pin behind upstream's latest?"""
@@ -296,8 +358,7 @@ def check(
     api = endpoint or releases_api_url(repo)
     release = fetch_latest_release(api, token=token, timeout=timeout)
     tag = latest_tag(release)
-    html_url = release.get("html_url")
-    latest_url = html_url if isinstance(html_url, str) and html_url else repo
+    latest_url = _safe_url(release.get("html_url"), repo)
     return VersionCheckResult(
         repo=repo,
         pinned_tag=pinned,
@@ -318,7 +379,7 @@ def notification(result: VersionCheckResult) -> str | None:
         return None
     return (
         f"A newer google-workspace upstream release is available: "
-        f"{result.latest_tag} (pinned: {result.pinned_tag}). "
+        f"{_safe_tag(result.latest_tag)} (pinned: {_safe_tag(result.pinned_tag)}). "
         f"Review {result.latest_url}, then — if you want it — bump "
         f"patches/upstream.pin (tag + commit) and re-generate the patch, a "
         f"deliberate edit. This server holds a Gmail send credential, so nothing "
@@ -341,6 +402,19 @@ def main(argv: list[str] | None = None) -> int:
             "Deterministically check whether a newer upstream Google Workspace "
             "MCP release exists than the installed pin (no model turn)."
         ),
+    )
+    # The documented invocation is ``version_check.py check`` (INSTALL.md, SKILL.md,
+    # the schedule/timer wiring). Accept ``check`` as a recognized command so that
+    # form runs the check instead of erroring "unrecognized arguments" (exit 2)
+    # before the check ever runs. Optional + defaulted so the bare / flag-only
+    # forms (``version_check.py``, ``--pin X``) keep working; an unknown verb still
+    # fails the argparse usage check.
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="check",
+        choices=["check"],
+        help="the check to run (only 'check'; the default)",
     )
     parser.add_argument(
         "--pin",

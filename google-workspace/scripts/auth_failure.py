@@ -11,12 +11,19 @@ visibly** until the owner re-authorizes.
 
 Mechanism (the offline-buildable central part of #9): a ``post_tool`` hook stands
 between a Google Workspace tool returning and the model reading the result. When
-the result carries a broken-credential signal (an ``invalid_grant`` /
-"expired or revoked" refresh error, an insufficient-scope 401/403, or an
+an **error-shaped** result carries a broken-credential signal (an ``invalid_grant``
+/ "expired or revoked" refresh error, an insufficient-scope 401/403, or an
 exhausted quota), the hook **annotates** the result with a prominent, actionable
 re-auth notice — keeping every byte of the original error below it (an
 :class:`Annotate`, never a :class:`Veto` that would withhold it, and never a
 deregistration). The tool is still there; the failure is just impossible to miss.
+
+The *error-shaped* gate (:func:`is_error_shaped`) matters because a Gmail read
+returns attacker-influenced content: an inbound email quoting "invalid_grant"
+must not fire a false re-auth notice on a healthy read. Only a result that is
+itself an error envelope — core's ``error:`` marker, an ``<HttpError>`` /
+``RefreshError`` repr, an OAuth error body — is amplified; successful content is
+never touched.
 
 Loud by default, configurable:
 
@@ -27,12 +34,14 @@ Neither is silent — even ``quiet`` still surfaces a visible error, because the
 thing this module refuses to do is let a broken capability disappear without a
 word. An unrecognized/blank mode falls back to ``loud`` (never accidentally quiet).
 
-Mock-debt (#10): the broken-credential *signals* matched below are modeled on the
-error shapes google-auth / googleapiclient / the upstream server emit; confirming
-that a **live** revoked Google token actually produces a matching string needs the
-running server + a real Google account, which lands with the live integration in
-#10. The mapping and the wiring here are real and tested offline against those
-fixtures; only the live trigger is deferred.
+Mock-debt (#10): the broken-credential *signals* and the *error-envelope* shapes
+matched below are modeled on what google-auth / googleapiclient / the upstream
+server emit — including the assumption that a broken-credential call comes back
+error-shaped (core's ``error:`` marker or an exception repr, not a success). The
+mapping and the wiring here are real and tested offline against those fixtures;
+confirming that a **live** revoked Google token actually produces a matching,
+error-shaped string needs the running server + a real Google account, which lands
+with the live integration in #10.
 
 Import-light on purpose (only stdlib/typing at module load), so the boot hook
 loader pays nothing to import it; the ``chief`` seam (:class:`Annotate`) is pulled
@@ -127,6 +136,29 @@ _QUOTA_SIGNALS: tuple[str, ...] = (
 _AUTH_RE = re.compile("|".join(re.escape(s) for s in _AUTH_SIGNALS), re.IGNORECASE)
 _QUOTA_RE = re.compile("|".join(re.escape(s) for s in _QUOTA_SIGNALS), re.IGNORECASE)
 
+# Markers that a result is an ERROR envelope, not successful content that merely
+# *mentions* an auth term. core (``chief.mcpclient.manager``) renders a failed
+# MCP tool result with a leading ``error:``; the google client libraries render a
+# failure as ``<HttpError ...>``, a ``*Error: ...`` exception repr, or an OAuth
+# ``{'error': ..., 'error_description': ...}`` token-endpoint envelope. A plain
+# inbound-email body carries none of these shapes, so an attacker can't turn a
+# healthy read into a fake broken-credential notice just by quoting "invalid_grant".
+_ERROR_SHAPE_SIGNALS: tuple[str, ...] = (
+    "<httperror",  # googleapiclient error repr
+    "refresherror",  # google.auth RefreshError
+    "googleautherror",
+    "defaultcredentialserror",
+    "transporterror",
+    "error_description",  # OAuth token-endpoint error field
+)
+_ERROR_SHAPE_RE = re.compile(
+    r"^\s*error:"  # core's isError marker (chief.mcpclient renders "error: …")
+    "|" + "|".join(re.escape(s) for s in _ERROR_SHAPE_SIGNALS)
+    # a JSON/dict OAuth error envelope: "error": / 'error':
+    + r"|['\"]error['\"]\s*:",
+    re.IGNORECASE,
+)
+
 
 def is_google_workspace_tool(tool_name: str) -> bool:
     """True for a tool core registered under this package's MCP server."""
@@ -152,6 +184,18 @@ def classify_failure(result: str) -> FailureKind | None:
 def is_credential_failure(result: str) -> bool:
     """True when a tool result carries any broken-credential / quota signal."""
     return classify_failure(result) is not None
+
+
+def is_error_shaped(result: str) -> bool:
+    """True when a tool result is itself an ERROR envelope — core marked it a tool
+    error (leading ``error:``), or it carries a google-auth / HTTP / OAuth error
+    shape — as opposed to *successful* content that merely mentions an auth term.
+
+    The amplifier gates on this so an inbound email containing the literal
+    ``invalid_grant`` / "expired or revoked" (attacker-influenceable content on a
+    healthy read) can't fake a broken credential and fire a false loud re-auth
+    notice. Purely deterministic — a literal-shape scan, no model call."""
+    return bool(result) and _ERROR_SHAPE_RE.search(result) is not None
 
 
 def parse_mode(value: Any) -> AuthFailureMode:
@@ -256,6 +300,13 @@ def register(context: Any, hooks: Any) -> None:
         from chief.hooks.posttool import Annotate
 
         if not is_google_workspace_tool(call.name):
+            return None
+        # Only amplify an ERROR-shaped result. A successful Gmail read is
+        # attacker-influenced inbound content: an email quoting "invalid_grant"
+        # must not trigger a false "AUTHORIZATION IS BROKEN" notice on a healthy
+        # read. A real broken credential arrives as an error envelope (core's
+        # "error:" marker, an <HttpError>/RefreshError repr, an OAuth error body).
+        if not is_error_shaped(result):
             return None
         account = None
         args = getattr(call, "arguments", None)

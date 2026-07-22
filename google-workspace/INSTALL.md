@@ -155,10 +155,13 @@ answers, so the flow is predictable and nothing is assumed silently:
    - The live MCP-over-stdio connection to a real Google account (which also
      exercises the OAuth grant, step 3) is validated in **#10**; this slice
      lands + proves the patch offline.
-7. Record it: `uv run python -m chief.registry_apply google-workspace` adds the
-   `google-workspace` entry to `data/installed.yaml` (the record the boot loader
-   reads to load this package's hooks — the inbound-Gmail screen **and** the
-   broken-auth amplifier, step 8). **The version stamp is the pin, not a
+7. Record it: `uv run python -m chief.registry_apply google-workspace --source
+   cloned` adds the `google-workspace` entry to `data/installed.yaml` (the record
+   the boot loader reads to load this package's hooks — the inbound-Gmail screen
+   **and** the broken-auth amplifier, step 8). Pass `--source cloned` because this
+   package is cloned from chief-packages, not bundled with core; the recorded
+   source drives which update path applies, so the default `bundled` would be
+   wrong here. **The version stamp is the pin, not a
    separate field.** `patches/upstream.pin` (tag + commit) is the single source
    of truth for which upstream release is installed; the deterministic version
    check reads it directly, and uninstall reconciles against it — so there is no

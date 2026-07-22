@@ -40,6 +40,7 @@ from auth_failure import (
     classify_failure,
     credential_failure_note,
     is_credential_failure,
+    is_error_shaped,
     is_google_workspace_tool,
     parse_mode,
 )
@@ -61,6 +62,16 @@ QUOTA_ERROR = (
 )
 
 CLEAN_RESULT = "Message sent. id=18f2c0a1b2c3d4e5, threadId=18f2c0a1b2c3d4e5"
+
+# A SUCCESSFUL Gmail read whose BODY merely mentions the auth terms — inbound,
+# attacker-influenceable content. It carries the literal signals but is NOT an
+# error envelope, so it must never trigger the loud re-auth notice.
+SUCCESSFUL_READ_WITH_AUTH_WORDS = (
+    "From: security-newsletter@example.com\n"
+    "Subject: Understanding OAuth errors\n\n"
+    "This week we explain the invalid_grant response and what it means when a "
+    "token has been expired or revoked. Reply to unsubscribe."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +122,31 @@ def test_bare_403_is_not_a_credential_failure() -> None:
     credential — it must not be amplified as a re-auth prompt."""
     per_file = "<HttpError 403 ... 'The user does not have permission for file X'>"
     assert classify_failure(per_file) is None
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3: only ERROR-shaped results are amplified                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_error_shaped_recognizes_real_error_envelopes() -> None:
+    # google-auth / googleapiclient / OAuth error envelopes are error-shaped…
+    assert is_error_shaped(REVOKED_CREDENTIAL_ERROR)  # RefreshError + error_description
+    assert is_error_shaped(INSUFFICIENT_SCOPE_ERROR)  # <HttpError
+    assert is_error_shaped(QUOTA_ERROR)  # <HttpError
+    # …as is anything core marked a tool error with its leading "error:" prefix.
+    assert is_error_shaped("error: google.auth ... invalid_grant")
+
+
+def test_successful_read_body_is_not_error_shaped() -> None:
+    # A healthy Gmail read whose body merely QUOTES the auth terms is NOT an
+    # error envelope — the discriminator that stops the false notice.
+    assert not is_error_shaped(SUCCESSFUL_READ_WITH_AUTH_WORDS)
+    assert not is_error_shaped(CLEAN_RESULT)
+    assert not is_error_shaped("")
+    # It still carries the raw signals (classify_failure sees them) — proving the
+    # gate, not the signal set, is what suppresses the false positive.
+    assert classify_failure(SUCCESSFUL_READ_WITH_AUTH_WORDS) is FailureKind.AUTH
 
 
 # --------------------------------------------------------------------------- #
@@ -268,3 +304,22 @@ def test_seam_ignores_non_google_tools(core_available: bool) -> None:
         config={},
     )
     assert text == REVOKED_CREDENTIAL_ERROR
+
+
+def test_seam_successful_read_with_invalid_grant_body_not_amplified(
+    core_available: bool,
+) -> None:
+    """Fix 3: a SUCCESSFUL Gmail read whose body merely quotes ``invalid_grant`` /
+    "expired or revoked" is attacker-influenceable inbound content — it must NOT
+    trigger the loud "AUTHORIZATION IS BROKEN" notice. Only an error-shaped result
+    is amplified, so the healthy read passes through untouched."""
+    if not core_available:
+        pytest.skip(_SKIP)
+    text = _run_amplifier(
+        core_available,
+        "mcp_google-workspace_get_gmail_message_content",
+        SUCCESSFUL_READ_WITH_AUTH_WORDS,
+        config={},
+    )
+    assert "AUTHORIZATION IS BROKEN" not in text
+    assert text == SUCCESSFUL_READ_WITH_AUTH_WORDS  # verbatim, untouched
