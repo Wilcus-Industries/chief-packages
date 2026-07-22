@@ -98,6 +98,15 @@ def _ensure_core_on_path() -> bool:
 CORE_AVAILABLE: bool = _ensure_core_on_path()
 
 
+# The google-workspace alias module (slice #3) is a stdlib-only, pure-logic
+# helper living under the package dir. Put its ``scripts/`` on ``sys.path`` so
+# tests import it by bare name (``import gw_aliases``) — the same import-time
+# mechanism used for core above, and needing no core checkout.
+_gw_scripts = str(repo_root() / "google-workspace" / "scripts")
+if _gw_scripts not in sys.path:
+    sys.path.insert(0, _gw_scripts)
+
+
 @pytest.fixture
 def core_available() -> bool:
     return CORE_AVAILABLE

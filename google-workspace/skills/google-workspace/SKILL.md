@@ -10,8 +10,42 @@ description: Gmail, Calendar, and Drive via a pinned Google Workspace MCP server
 
 Gmail, Calendar, and Drive access for chief, backed by a pinned upstream Google
 Workspace MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp))
-run over stdio. Per-account: the owner grants one Google account and its scope is
-recorded in the `google_workspace` config key.
+run over stdio. Multiple Google accounts (e.g. personal + work) coexist in one
+process, credentials keyed per address — see **Accounts** below.
+
+## Accounts: every tool call names one, explicitly
+
+There is **no default account**. Every Google Workspace tool call must pass an
+explicit `account` argument — the full email address the call acts as. The
+upstream server *can* fall back to a default account; this package leaves that
+fallback unset on purpose, so an omitted `account` is an error, not a silent
+pick of whichever account happens to be first.
+
+The owner keeps friendly names in an **alias file** (`name: address` per line,
+`#` comments allowed):
+
+```
+work: me@company.com
+personal: me@gmail.com
+```
+
+Resolve a friendly name to its address *before* the call with the bundled,
+stdlib-only helper, run through the **shell** tool from the run root:
+
+```
+GW=skills/google-workspace/scripts/gw_aliases.py
+uv run python $GW resolve work        # -> me@company.com  (exit 0)
+uv run python $GW list                # print the alias file, canonical form
+```
+
+Pass the resolved address as `account`. The helper — and this skill — hold the
+line rather than guessing:
+
+- **Unknown** name → the helper exits non-zero; don't invent an address.
+- **Ambiguous** name (matches more than one account) → the helper errors
+  instead of guessing. **Ask the owner** which account they mean, then retry.
+- **Omitted** account → never default to one. If the owner didn't say which
+  account, ask before calling any tool.
 
 ## Reading
 
