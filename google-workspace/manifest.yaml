@@ -7,6 +7,12 @@ mcp_servers:
     command:
       - uvx
       - workspace-mcp
+      - --tool-tier
+      - core
+      - --tools
+      - gmail
+      - drive
+      - calendar
 skills:
   - skills/google-workspace
 config_keys:

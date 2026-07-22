@@ -49,8 +49,11 @@ line rather than guessing:
 
 ## Reading
 
-Read tools (list/search mail, read events, list Drive files) are open — no gate.
-TODO: catalog the exact read tools this server exposes (read/write tool split).
+Read tools — search/get mail, list calendars, get events, search/get Drive files,
+and get an existing shareable link — have no side effect and are **open**: the
+install registers their `mcp_google-workspace_*` names on chief's gate by-name
+approve set, so they auto-approve without a card. The exact read/write split is
+catalogued in `scripts/tool_gate.py` (`uv run python scripts/tool_gate.py reads`).
 
 ## Inbound sender trust
 
@@ -101,15 +104,29 @@ gate is the write-gate slice's job (see below).
 
 ## Writing is gated
 
-Every write — sending mail, creating/editing calendar events, modifying Drive —
-routes through the `screening` package for explicit owner approval. Never send or
-mutate on the owner's behalf without that confirmation.
-TODO(#5): screening wiring. TODO(#6): the write-tool → gate binding.
+Every write — sending mail (`send_gmail_message`), creating/editing/deleting
+calendar events (`manage_event`), and writing to Drive (`create_drive_file`,
+`create_drive_folder`, the `import_to_google_*` tools, and
+`get_drive_file_download_url`, which writes file bytes to local disk) — is
+deliberately **left off** the gate's approve set, so **every write raises chief's
+gate approval card and waits for an explicit owner "yes"**. This holds until the
+owner decides otherwise; there is no silent send or mutate. Writes stay carded
+even for a catalogued/verified sender — per the PRD this card is the one control
+that survives a clever injection, so the sender-trust catalog and any classifier
+only reduce noise around it, they never bypass it.
+
+The posture is an **allowlist**, not a denylist: a write tool cards because it is
+absent from the approved reads, so a newly-added or unrecognized tool cards by
+default too — denial stays explicit. The write tool names are catalogued in
+`scripts/tool_gate.py` (`uv run python scripts/tool_gate.py writes`).
+TODO(#5): the heavier `screening` classification wiring layers on top of this card.
 
 ## Setup, at a glance
 
 - Owner consent + OAuth credentials live in the `google_workspace_credentials`
   secret. TODO(#8).
-- The server launches via a pinned `uvx` command. TODO(#7): the finalized,
-  pinned launch command (placeholder today: `uvx workspace-mcp`).
+- The server launches via `uvx workspace-mcp --tool-tier core --tools gmail
+  drive calendar`, so only the `core`-tier Gmail / Calendar / Drive tools are
+  registered (without the flags upstream exposes every service at every tier).
+  TODO(#7): pin the exact `workspace-mcp` version; keep the tier/service flags.
 - Version + uninstall bookkeeping. TODO(#9).

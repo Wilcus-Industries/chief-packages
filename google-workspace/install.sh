@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Deterministic install for the google-workspace alias helper: land the skill
-# and its bundled gw_aliases.py, then seed an empty alias file. This wires ONLY
-# the per-account alias helper the skill documents — the MCP server pin, OAuth
-# grant, and write-gate are separate slices (see INSTALL.md's TODO(#7)/(#8)/(#9)
-# steps), not here.
+# Deterministic install for google-workspace: land the skill, its bundled
+# gw_aliases.py, and the tool_gate.py write-gate catalog (the read/write split
+# INSTALL step 5 registers on the gate), then seed an empty alias file. The MCP
+# server version pin and the OAuth grant are still separate slices (see
+# INSTALL.md's TODO(#7)/(#8)/(#9) steps), not here.
 #
 # Run it from your repo root, then `restart`. It copies from its own dir, so it
 # works wherever the package is cloned; the destination skills/ + data/ paths
@@ -19,6 +19,10 @@ cp "$src/SKILL.md" "$dst/SKILL.md"
 # skills/google-workspace/scripts/gw_aliases.py — copy it there so that path
 # exists post-install.
 cp "$here/scripts/gw_aliases.py" "$dst/scripts/gw_aliases.py"
+# tool_gate.py is the read/write tool catalog (#6) — land it at the path the
+# skill/INSTALL document so `uv run python .../tool_gate.py reads` works to list
+# the read tool names to register on the gate's approve set.
+cp "$here/scripts/tool_gate.py" "$dst/scripts/tool_gate.py"
 
 # Seed an empty alias file once. Never clobber an existing one — the owner's
 # name: address aliases are their own data.
