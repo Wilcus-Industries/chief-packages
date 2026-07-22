@@ -79,7 +79,9 @@ fi
 # Pin + patch + warm the upstream MCP server (#7). Clones the exact commit in
 # patches/upstream.pin to data/google-workspace/server, applies the auth-result-
 # header patch, and warms deps. FAILS LOUD (set -e aborts the install) if the
-# patch does not apply — a server that omits Authentication-Results degrades the
-# sender-trust catalog to unverified From matching, worse than no catalog. Set
-# GW_SKIP_WARM=1 to skip the `uv sync` warm on an offline box (patch still runs).
+# patch does not apply — a server that omits Authentication-Results leaves the
+# sender-trust catalog unable to verify any sender (it never falls back to the
+# forgeable From), so every message fails closed to owner-confirm and the feature
+# is broken. Set GW_SKIP_WARM=1 to skip the `uv sync` warm on an offline box
+# (patch still runs).
 bash "$here/scripts/setup_upstream.sh"

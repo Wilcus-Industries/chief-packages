@@ -1,21 +1,23 @@
 diff --git a/gmail/gmail_helpers.py b/gmail/gmail_helpers.py
-index dd6b9e0..14398ad 100644
+index dd6b9e0..aff45d1 100644
 --- a/gmail/gmail_helpers.py
 +++ b/gmail/gmail_helpers.py
-@@ -37,6 +37,11 @@ GMAIL_METADATA_HEADERS = [
+@@ -37,6 +37,13 @@ GMAIL_METADATA_HEADERS = [
      "List-Unsubscribe",
      "Precedence",
      "List-Id",
 +    # Requested so the Gmail API returns the boundary MTA's authentication
 +    # verdict on inbound mail. A downstream consumer keys sender trust on the
 +    # authserv-id-pinned Authentication-Results header (SPF/DKIM/DMARC), never
-+    # the forgeable From, so it must be in the fetched header set.
++    # the forgeable From, so it must be in the fetched header set. A relayed
++    # message can carry more than one AR header (a prior hop's below our
++    # boundary MTA's), so every occurrence is preserved (see _extract_headers).
 +    "Authentication-Results",
  ]
  
  
 diff --git a/gmail/gmail_tools.py b/gmail/gmail_tools.py
-index cb95b08..8066e48 100644
+index cb95b08..10984ab 100644
 --- a/gmail/gmail_tools.py
 +++ b/gmail/gmail_tools.py
 @@ -284,6 +284,7 @@ def _format_message_header_lines(
@@ -26,16 +28,38 @@ index cb95b08..8066e48 100644
  
      content_lines = []
      if message_id:
-@@ -313,6 +314,12 @@ def _format_message_header_lines(
+@@ -313,6 +314,14 @@ def _format_message_header_lines(
          content_lines.append(f"Precedence: {precedence}")
      if list_id:
          content_lines.append(f"List-Id: {list_id}")
 +    if authentication_results:
-+        # The verified-sender trust catalog parses this header (authserv-id
-+        # pinned; SPF/DKIM/DMARC) off the read output, so it must be surfaced.
-+        content_lines.append(
-+            f"Authentication-Results: {authentication_results}"
-+        )
++        # The verified-sender trust catalog parses these off the read output
++        # (authserv-id pinned; SPF/DKIM/DMARC), so ALL of them must be surfaced.
++        # _extract_headers newline-joins repeated occurrences; emit one
++        # Authentication-Results line per occurrence, order preserved, so the
++        # catalog's get_all + topmost-matching-authserv-id defense stays intact.
++        for ar in authentication_results.split("\n"):
++            content_lines.append(f"Authentication-Results: {ar}")
  
      return content_lines
+ 
+@@ -671,7 +680,18 @@ def _extract_headers(payload: dict, header_names: List[str]) -> Dict[str, str]:
+         header_name_lower = header["name"].lower()
+         if header_name_lower in target_headers:
+             # Store using the original requested casing
+-            headers[target_headers[header_name_lower]] = header["value"]
++            key = target_headers[header_name_lower]
++            if key == "Authentication-Results" and key in headers:
++                # A relayed message can carry several Authentication-Results
++                # headers (a prior hop's below our boundary MTA's). A downstream
++                # consumer keys sender trust on the authserv-id-pinned topmost
++                # match, so a last-occurrence-wins collapse would silently drop
++                # the boundary verdict. Keep EVERY occurrence, order preserved,
++                # newline-joined (each value is a single unfolded line); the
++                # formatter re-emits one header line per occurrence.
++                headers[key] = headers[key] + "\n" + header["value"]
++            else:
++                headers[key] = header["value"]
+     return headers
+ 
  

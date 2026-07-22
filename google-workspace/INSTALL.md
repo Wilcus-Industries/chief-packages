@@ -92,12 +92,16 @@ Depends on the `screening` package for that gating.
    first stdio connect never races a dependency resolution.
    - **The patch is REQUIRED and the apply is fail-loud.** It adds the message's
      `Authentication-Results` header(s) to the Gmail read output. Without it the
-     sender-trust catalog (#4, `scripts/sender_trust.py`) has nothing to verify
-     and would silently degrade to matching the forgeable `From` — worse than no
-     catalog — so a non-applying patch is a HARD ERROR that aborts the install
+     sender-trust catalog (#4, `scripts/sender_trust.py`) has nothing to verify,
+     so it can never verify **any** sender — the catalog never falls back to the
+     forgeable `From`; a missing AR header just fails closed and routes every
+     message to owner-confirm, leaving the feature broken. That is why a
+     non-applying patch is a HARD ERROR that aborts the install
      (`scripts/apply_upstream_patch.sh`), never a warning. Re-generate the patch
      if you bump the pin. The patch is offered upstream; once merged, delete it
-     and bump the pin in the same change (setup then applies nothing).
+     and bump the pin in the same change (setup then verifies the mechanism is
+     already present in the tree and applies nothing — a lost patch file with the
+     mechanism absent still hard-fails).
    - Do **not** drop the `--tool-tier` / `--tools` flags — they scope the surface
      to core-tier Gmail/Calendar/Drive (a bare launch registers every service at
      every tier, ~60 tools) and are what makes the read/write split above real.

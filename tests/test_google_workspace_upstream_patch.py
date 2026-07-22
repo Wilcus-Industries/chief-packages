@@ -49,6 +49,12 @@ SERVER_DIR = "data/google-workspace/server"
 # posture): the launch command must carry this exact subsequence.
 REQUIRED_FLAGS = ["--tool-tier", "core", "--tools", "gmail", "drive", "calendar"]
 
+# The launch prefix that must be preserved: `uv run --frozen` runs the warmed
+# lockfile WITHOUT re-resolving, so dropping `--frozen` would reintroduce
+# launch-time lock mutation (installing unvetted dep versions at connect) — the
+# same vector setup_upstream.sh's `uv sync --locked` warm closes at install time.
+REQUIRED_LAUNCH_PREFIX = ["uv", "run", "--frozen"]
+
 _lifted_counter = itertools.count()
 
 
@@ -107,6 +113,12 @@ def test_manifest_launch_pins_server_and_keeps_restriction_flags() -> None:
     assert any(SERVER_DIR in part for part in command), (
         f"launch command must reference the pinned server dir {SERVER_DIR!r}: "
         f"{command}"
+    )
+
+    # The launch runs via `uv run --frozen` — dropping `--frozen` would let the
+    # launch re-resolve and mutate the lockfile at connect time (Fix 6).
+    assert _contains_subsequence(command, REQUIRED_LAUNCH_PREFIX), (
+        f"launch command must run via {REQUIRED_LAUNCH_PREFIX}: {command}"
     )
 
     # The restriction flags appear in order as a contiguous subsequence.
@@ -267,9 +279,37 @@ def _fixture_payload() -> dict[str, Any]:
     }
 
 
-def _read_output(server: Path, workdir: Path) -> str:
+def _multi_ar_payload() -> dict[str, Any]:
+    """A relayed message carrying TWO Authentication-Results headers: Google's
+    genuine ``mx.google.com`` boundary verdict ON TOP, a prior forwarder hop's
+    foreign-authserv-id verdict BELOW it — the order the Gmail API returns them
+    (most-recent hop first). A last-occurrence-wins collapse would keep the
+    foreign header and drop Google's boundary verdict, inverting sender_trust's
+    topmost-wins defense."""
+    payload = _fixture_payload()
+    # Appended AFTER the mx.google.com header, so it sits below it (the relay hop
+    # that handled the message before Google's boundary added the top verdict).
+    payload["headers"].append(
+        {
+            "name": "Authentication-Results",
+            "value": (
+                "relay.forwarder.test; "
+                "spf=pass smtp.mailfrom=list@forwarder.test; "
+                "dmarc=pass header.from=forwarder.test"
+            ),
+        }
+    )
+    return payload
+
+
+def _read_output(
+    server: Path, workdir: Path, payload: dict[str, Any] | None = None
+) -> str:
     mod = _lift_header_funcs(server, workdir)
-    headers = mod._extract_headers(_fixture_payload(), mod.GMAIL_METADATA_HEADERS)
+    headers = mod._extract_headers(
+        payload if payload is not None else _fixture_payload(),
+        mod.GMAIL_METADATA_HEADERS,
+    )
     lines = mod._format_message_header_lines(headers)
     return "\n".join(lines)
 
@@ -290,6 +330,38 @@ def test_patched_server_emits_auth_results_the_catalog_reads(
     assert "Authentication-Results: mx.google.com;" in output
 
     # Alignment: feed the emitted output straight into #4's parser.
+    assert verified_sender(output + "\n\nbody") == "alice@example.com"
+
+
+def test_patched_server_emits_all_authentication_results_headers(
+    pristine_upstream: Path, tmp_path: Path
+) -> None:
+    """Fix 1: a relayed message with Google's mx.google.com AR on top and a
+    foreign-authserv-id AR below must surface BOTH lines — one
+    Authentication-Results line per occurrence, order preserved — not a
+    last-occurrence-wins collapse. The sender-trust parser (get_all + topmost-
+    matching authserv-id) then still resolves the verified sender via the Google
+    boundary header, proving the collapse that would invert sender_trust's
+    topmost-wins defense is gone."""
+    from sender_trust import verified_sender
+
+    patched = _copy(pristine_upstream, tmp_path / "multi-ar")
+    result = _apply_patch(patched)
+    assert result.returncode == 0, f"patch failed to apply: {result.stderr}"
+
+    output = _read_output(patched, tmp_path, _multi_ar_payload())
+    ar_lines = [
+        line
+        for line in output.splitlines()
+        if line.startswith("Authentication-Results:")
+    ]
+    # BOTH occurrences survive, in order (Google topmost) — not one collapsed line.
+    assert len(ar_lines) == 2, f"expected both AR headers emitted, got: {ar_lines}"
+    assert "mx.google.com" in ar_lines[0]
+    assert "relay.forwarder.test" in ar_lines[1]
+
+    # The catalog resolves the verified sender via the Google boundary header,
+    # not the foreign relay one — the topmost-matching-authserv-id defense holds.
     assert verified_sender(output + "\n\nbody") == "alice@example.com"
 
 
@@ -327,3 +399,53 @@ def test_apply_is_idempotent(pristine_upstream: Path, tmp_path: Path) -> None:
     second = _apply_patch(tree)
     assert second.returncode == 0, second.stderr
     assert "already applied" in (second.stdout + second.stderr)
+
+
+def _apply_with_empty_patches_dir(
+    clone: Path, workdir: Path, tag: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the REAL applier with an EMPTY ``patches/`` dir beside it — the
+    zero-patch-files branch — against ``clone``.
+
+    The applier resolves its patches dir as ``<script>/../patches``, so a copy of
+    the script into ``<staged>/scripts/`` with an empty ``<staged>/patches/``
+    exercises the genuine zero-patch code path without touching the checked-in
+    patch."""
+    staged = workdir / f"empty-patches-{tag}"
+    (staged / "scripts").mkdir(parents=True, exist_ok=True)
+    (staged / "patches").mkdir(parents=True, exist_ok=True)  # empty on purpose
+    script = staged / "scripts" / APPLY_SH.name
+    shutil.copy(APPLY_SH, script)
+    return subprocess.run(
+        ["bash", str(script), str(clone)], capture_output=True, text=True
+    )
+
+
+def test_zero_patches_hard_fails_when_mechanism_absent(
+    pristine_upstream: Path, tmp_path: Path
+) -> None:
+    """Fix 2: an empty patches/ glob must NOT silently install an unpatched
+    server. With no patch file AND the Authentication-Results mechanism absent
+    from the tree (a lost/renamed patch file), the applier HARD-FAILS loud —
+    closing the "presumably merged upstream" exit-0 hole."""
+    clone = _copy(pristine_upstream, tmp_path / "zero-absent")  # pristine/unpatched
+    result = _apply_with_empty_patches_dir(clone, tmp_path, "absent")
+    assert result.returncode != 0, "empty patches + absent mechanism must abort"
+    combined = result.stdout + result.stderr
+    assert "FATAL" in combined and "ABSENT" in combined
+
+
+def test_zero_patches_ok_when_mechanism_already_present(
+    pristine_upstream: Path, tmp_path: Path
+) -> None:
+    """Fix 2: the genuine "merged upstream, patch deleted" end state — no patch
+    file but the mechanism IS present in the tree — is the ONLY zero-patch
+    exit 0. Prove it by first applying the real patch, then running the
+    zero-patch path against the now-patched tree."""
+    clone = _copy(pristine_upstream, tmp_path / "zero-present")
+    applied = _apply_patch(clone)  # install the mechanism via the real patch
+    assert applied.returncode == 0, applied.stderr
+
+    result = _apply_with_empty_patches_dir(clone, tmp_path, "present")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "merged upstream" in (result.stdout + result.stderr)

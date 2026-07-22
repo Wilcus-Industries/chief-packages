@@ -8,9 +8,12 @@
 # the exact commit recorded in patches/upstream.pin and the checked-out HEAD is
 # verified to match. A moving branch is never used.
 #
-# Warming: `uv sync` resolves + downloads the server's deps into the shared uv
-# cache now, so the daemon's first stdio connect does not race a cold dependency
-# resolution. Requires network + uv; both are install-time prerequisites.
+# Warming: `uv sync --locked` installs the server's PINNED deps into the shared
+# uv cache now, so the daemon's first stdio connect does not race a cold
+# dependency resolution. `--locked` refuses to re-resolve — an inconsistent
+# tagged lockfile aborts loud instead of silently rewriting uv.lock with unvetted
+# dep versions that the `--frozen` launch would then trust. Requires network +
+# uv; both are install-time prerequisites.
 #
 # Env:
 #   GW_SERVER_DIR   checkout destination (default data/google-workspace/server)
@@ -35,6 +38,34 @@ fi
 
 dst="${GW_SERVER_DIR:-data/google-workspace/server}"
 
+# Guard the destructive `rm -rf "$dst"` below: $dst derives from the unvalidated
+# GW_SERVER_DIR env var, so refuse anything that could wipe the wrong tree — an
+# empty value, the filesystem root, an absolute path OUTSIDE the repo we run
+# from, or a relative path that escapes the repo via `..`. The clone destination
+# must live under the repo root (default data/google-workspace/server).
+repo_root="$(pwd)"
+case "$dst" in
+  "")
+    echo "setup_upstream: GW_SERVER_DIR is empty — refusing to rm -rf it." >&2
+    exit 1 ;;
+  "/")
+    echo "setup_upstream: GW_SERVER_DIR is '/' — refusing to rm -rf it." >&2
+    exit 1 ;;
+  /*)
+    case "$dst" in
+      "$repo_root"/?*) : ;;  # absolute, strictly under the repo — OK
+      *)
+        echo "setup_upstream: GW_SERVER_DIR='$dst' is an absolute path outside" \
+          "the repo root '$repo_root' — refusing to rm -rf it. Use a" \
+          "repo-relative path (default data/google-workspace/server)." >&2
+        exit 1 ;;
+    esac ;;
+  *..*)
+    echo "setup_upstream: GW_SERVER_DIR='$dst' contains '..' and could escape" \
+      "the repo — refusing to rm -rf it." >&2
+    exit 1 ;;
+esac
+
 # Fresh clone every time so the patch applies to a pristine tree (never a
 # double-apply). Clone the tag shallow, then hard-verify HEAD is the pinned SHA.
 rm -rf "$dst"
@@ -58,8 +89,8 @@ bash "$here/apply_upstream_patch.sh" "$dst"
 if [ -n "${GW_SKIP_WARM:-}" ]; then
   echo "setup_upstream: GW_SKIP_WARM set — skipping dependency warm."
 else
-  echo "setup_upstream: warming server dependencies (uv sync) ..."
-  uv sync --directory "$dst"
+  echo "setup_upstream: warming server dependencies (uv sync --locked) ..."
+  uv sync --locked --directory "$dst"
   echo "setup_upstream: dependencies warmed."
 fi
 
