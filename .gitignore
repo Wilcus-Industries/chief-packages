@@ -1,0 +1,8 @@
+# Python test-toolchain artifacts (see pyproject.toml). uv.lock is committed for
+# reproducible checks; its build/cache byproducts are not.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

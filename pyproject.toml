@@ -1,0 +1,94 @@
+# chief-packages is a directory-of-packages repo, not a Python distribution:
+# each package is document-driven (manifest.yaml + INSTALL.md + skills). This
+# pyproject exists only to give the repo a test toolchain (pytest/ruff/mypy) so
+# the manifests can be checked against chief core's real MCP-manifest loader.
+[project]
+name = "chief-packages"
+version = "0.0.0"
+description = "Capability packages for the chief agent daemon (docs-driven, not a dist)."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.4",
+    "pyyaml>=6",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    # chief core's runtime deps. Tests reach real core seams (chief.gate,
+    # chief.hooks.posttool, chief.classifiers, …) by putting a local core
+    # checkout's src/ on sys.path (see tests/conftest.py) — but those seams
+    # transitively import these third-party packages, so without them the
+    # import fails at collection. Pinned to match core's pyproject; keep in
+    # step when core bumps. (The stdlib-only chief.mcp_manifest loader needs
+    # none of these; the heavier seams the later google-workspace slices touch
+    # do.)
+    "httpx>=0.28",
+    "sqlalchemy[asyncio]>=2",
+    "aiosqlite>=0.20",
+    "croniter>=3",
+    "starlette>=0.47",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.18",
+    "mcp>=1",
+    # google-workspace's oauth_consent (#8) writes the Google authorized-user
+    # credential shape that google-auth's Credentials.from_authorized_user_info
+    # loads; the expiry-format regression test round-trips through that real
+    # loader (core's venv carries google-auth transitively).
+    "google-auth>=2",
+]
+
+[tool.uv]
+# Not an installable package — just a test harness over the manifests.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Surface skip reasons in default output — the real-loader tests skip *loudly*
+# only when no core checkout is reachable, and that reason must be visible.
+addopts = "-ra"
+# Guardrail: these are pure static/loader checks; a hung test fails fast.
+timeout = 30
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# mypy is scoped to tests/ only — the package dirs are docs plus sandbox-run
+# scripts (they import chief-internal and third-party deps not installed here),
+# so type-checking them would be meaningless. `mypy .` still discovers them, so
+# exclude everything outside tests/ from the recursive walk.
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["tests"]
+exclude = ['^(?!tests/).+\.py$']
+
+# core's mcp_manifest is imported at runtime via sys.path (see tests/conftest);
+# mypy can't see it, and pyyaml ships no inline stubs for the bare `yaml` name.
+# gw_aliases (#3), sender_trust (#4), gmail_screen (#5), tool_gate (#6),
+# oauth_consent (#8), version_check + auth_failure (#9) are google-workspace
+# package-dir scripts reached via sys.path too (conftest puts their scripts/ dir
+# on it) — outside mypy's tests/-only scope, so their import in the tests is
+# treated like core's.
+[[tool.mypy.overrides]]
+module = [
+    "chief", "chief.*", "yaml",
+    "gw_aliases", "sender_trust", "gmail_screen", "tool_gate", "oauth_consent",
+    "version_check", "auth_failure",
+]
+ignore_missing_imports = true
+
+# google-auth is a real installed dev dep (the #8 expiry round-trip test drives
+# its actual `from_authorized_user_info` loader) but ships no type stubs, so
+# strict mode would flag every call to it as `no-untyped-call`. Skip following it
+# — treat everything from it as Any — regardless of whether it's installed.
+[[tool.mypy.overrides]]
+module = ["google.*"]
+follow_imports = "skip"
+follow_untyped_imports = true
+ignore_missing_imports = true
