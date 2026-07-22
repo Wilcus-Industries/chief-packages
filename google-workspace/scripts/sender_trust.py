@@ -28,17 +28,23 @@ fail-closed boundaries protect the parse (both RFC 8601 §5/§7):
   part, so an identity is trusted only when an explicit ``dmarc=pass`` asserts
   ``From`` alignment. Absent DMARC → ``None`` (see ``verified_sender``).
 
-**Residual limitation (tracked in #14).** The authserv-id pin defends forged AR
-on *delivered* mail: a message an attacker **sends** carries the wrong
-authserv-id (or none) and is rejected. It does **not** defend a message written
-directly into the mailbox — ``messages.insert`` (the Gmail API insert scope),
-IMAP ``APPEND``, or "Import mail" — because there the attacker controls the
-entire raw message, including a forged ``Authentication-Results: mx.google.com;
-…`` bearing *our* authserv-id, and nothing at delivery stripped it. This module
-cannot distinguish that from a genuine boundary header. The real fix is a
-retrieval-layer delivery-provenance signal (does this message have a true
-delivery record?), filed as **#14** — not header parsing. Do not read this
-catalog as closing that vector.
+**Inserted/imported mail — the provenance gate (#14).** The authserv-id pin
+defends forged AR on *delivered* mail: a message an attacker **sends** carries
+the wrong authserv-id (or none) and is rejected. It does **not**, by itself,
+defend a message written directly into the mailbox — ``messages.insert`` (the
+Gmail API insert scope), IMAP ``APPEND``, or "Import mail" — because there the
+attacker controls the entire raw message, including a forged
+``Authentication-Results: mx.google.com; …`` bearing *our* authserv-id, and
+nothing at delivery stripped it. Header parsing alone cannot distinguish that
+from a genuine boundary header. So trust is additionally gated on a
+**retrieval-layer** signal the raw message cannot carry: ``resolve_sender``
+grants ``ALLOW`` only when its ``provenance`` is ``SMTP_DELIVERED`` (default
+``UNKNOWN`` → fail closed), and ``resolve_message`` / ``classify_delivery``
+derive that from Gmail ``messages.get`` metadata (a receipt-time ``CATEGORY_*``
+label that insert/import bypass). This is defense-in-depth, not proof (a
+sophisticated inserter that also forges plausible API metadata is out of scope);
+the load-bearing control for acting on the owner's behalf stays the write-gate
+approval card (#6). Do not read this catalog as the last line of defense.
 
 Scope note: this module is the trust catalog + verified-sender resolution only,
 and it is a **noise-reducer, not the last line of defense**. Reads are open;
@@ -355,6 +361,65 @@ class SenderTrustCatalog:
 # --------------------------------------------------------------------------- #
 
 
+class DeliveryProvenance(Enum):
+    """How a message arrived in the mailbox — the retrieval-layer signal that
+    gates whether its ``Authentication-Results`` header may be trusted at all.
+
+    ``Authentication-Results`` is only meaningful on mail that actually transited
+    Google's inbound MTA — Google strips a sender's forged AR and stamps its own.
+    A message written **directly into the mailbox** (``gmail.insert``, IMAP
+    ``APPEND``, or "Import mail") carries whatever raw bytes the writer chose,
+    *including* a forged ``Authentication-Results: mx.google.com; …dmarc=pass…``
+    bearing our own pinned authserv-id — nothing stripped it, so header parsing
+    (``verified_sender``) cannot tell it from a genuine boundary header. The only
+    defense is out-of-band: a delivery-provenance signal from the retrieval path.
+    """
+
+    SMTP_DELIVERED = "smtp_delivered"  # transited Google's inbound MTA
+    NOT_DELIVERED = "not_delivered"  # inserted / imported / APPENDed
+    UNKNOWN = "unknown"  # no provenance signal — treated as untrusted
+
+
+# Gmail applies a ``CATEGORY_*`` label during receipt-time classification, which
+# ``messages.insert`` / IMAP ``APPEND`` / import explicitly BYPASS (the Gmail API
+# docs: insert "bypass[es] most scanning and classification"). Their presence is
+# positive evidence the message was genuinely delivered; a mailbox-writer with
+# only insert scope controls the raw message bytes, not Gmail's own classifier.
+_DELIVERY_CLASSIFIED_LABELS = frozenset(
+    {
+        "CATEGORY_PERSONAL",
+        "CATEGORY_SOCIAL",
+        "CATEGORY_PROMOTIONS",
+        "CATEGORY_UPDATES",
+        "CATEGORY_FORUMS",
+    }
+)
+
+
+def classify_delivery(metadata: Mapping[str, object]) -> DeliveryProvenance:
+    """Best-effort delivery provenance from a Gmail ``messages.get`` metadata
+    resource (``labelIds`` etc.) — the signal ``resolve_sender`` gates trust on.
+
+    Conservative and fail-closed. A Gmail receipt-time ``CATEGORY_*`` label is
+    positive evidence of SMTP delivery (insert/import bypass classification).
+    Its *absence* is not proof of insertion — Gmail may leave a message
+    uncategorized — so absence yields ``UNKNOWN``, which is treated as untrusted:
+    trust is granted only on positive delivery evidence, never by default.
+
+    **Limits.** This reads Gmail *metadata*, not the forgeable raw message, which
+    is the whole point (an inserter controls bytes, not the classifier). But it
+    is defense-in-depth, not proof: a sophisticated inserter that also sets a
+    plausible ``CATEGORY_*`` label via the API would read as delivered here. The
+    load-bearing control for acting on the owner's behalf remains the write-gate
+    approval card (#6); this only hardens the noise-reducing catalog.
+    """
+    labels = metadata.get("labelIds")
+    label_set = {str(item) for item in labels} if isinstance(labels, list) else set()
+    if label_set & _DELIVERY_CLASSIFIED_LABELS:
+        return DeliveryProvenance.SMTP_DELIVERED
+    return DeliveryProvenance.UNKNOWN
+
+
 class Action(Enum):
     """What to do with a message, given its sender's trust."""
 
@@ -411,21 +476,54 @@ def resolve_sender(
     raw_message: str,
     catalog: SenderTrustCatalog,
     trusted_authserv_id: str = DEFAULT_TRUSTED_AUTHSERV_ID,
+    *,
+    provenance: DeliveryProvenance = DeliveryProvenance.UNKNOWN,
 ) -> TrustDecision:
     """Resolve a raw message to a trust decision.
 
-    Verified known sender → its tier, ``ALLOW``. Everything else (verification
-    failed, or the verified sender isn't catalogued) → a metadata-only log and
-    the ``OWNER_CONFIRM`` flow. Crucially, the lookup keys on ``verified_sender``,
-    so a ``From``-only spoof of a catalogued address never resolves to its tier —
-    and ``verified_sender`` itself only trusts an AR header added at our
+    Verified known sender **on genuinely delivered mail** → its tier, ``ALLOW``.
+    Everything else (verification failed, the verified sender isn't catalogued,
+    or the message did not transit Google's inbound MTA) → a metadata-only log
+    and the ``OWNER_CONFIRM`` flow. The lookup keys on ``verified_sender``, so a
+    ``From``-only spoof of a catalogued address never resolves to its tier — and
+    ``verified_sender`` itself only trusts an AR header added at our
     ``trusted_authserv_id`` boundary and backed by an explicit ``dmarc=pass``.
+
+    **Provenance gate (#14).** ``provenance`` must be
+    ``DeliveryProvenance.SMTP_DELIVERED`` for a catalogued sender to be allowed.
+    An inserted/imported/APPENDed message (or one with no provenance signal —
+    the fail-closed ``UNKNOWN`` default) is routed to ``OWNER_CONFIRM`` *even if*
+    it carries a valid-looking ``mx.google.com`` AR for a catalogued address:
+    that AR is forgeable on mail that never transited Google's MTA, so header
+    parsing alone cannot trust it. Use ``resolve_message`` to derive
+    ``provenance`` from Gmail metadata, or ``classify_delivery`` directly.
     """
     verified = verified_sender(raw_message, trusted_authserv_id)
     tier = catalog.lookup(verified)
-    if tier is not None:
+    if tier is not None and provenance is DeliveryProvenance.SMTP_DELIVERED:
         return TrustDecision(verified, tier, Action.ALLOW, metadata=None)
     msg = message_from_string(raw_message)
     return TrustDecision(
         verified, None, Action.OWNER_CONFIRM, metadata=_metadata_of(msg, verified)
+    )
+
+
+def resolve_message(
+    raw_message: str,
+    metadata: Mapping[str, object],
+    catalog: SenderTrustCatalog,
+    trusted_authserv_id: str = DEFAULT_TRUSTED_AUTHSERV_ID,
+) -> TrustDecision:
+    """Resolve a fetched Gmail message (raw bytes + its ``messages.get``
+    metadata) to a trust decision — the entry point the retrieval integration
+    (#5/#7) uses. Derives delivery provenance from ``metadata`` via
+    ``classify_delivery`` and applies the ``resolve_sender`` provenance gate, so
+    an inserted/imported message never earns catalogued trust from its own
+    embedded AR headers.
+    """
+    return resolve_sender(
+        raw_message,
+        catalog,
+        trusted_authserv_id,
+        provenance=classify_delivery(metadata),
     )

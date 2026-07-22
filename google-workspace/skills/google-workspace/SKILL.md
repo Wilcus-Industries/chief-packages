@@ -110,14 +110,19 @@ Two fail-closed boundaries keep the auth verdicts themselves honest (RFC 8601
   `From` alignment. A bare SPF/DKIM pass with DMARC absent ⇒ unverified (else a
   shared/multi-tenant domain could authenticate any address at that domain).
 
-**Residual limitation (tracked in #14).** The authserv-id pin defends forged AR
-on *delivered* mail — a message an attacker **sends** carries the wrong
-authserv-id and is rejected. It does **not** defend a message written directly
-into the mailbox (`messages.insert` / IMAP `APPEND` / "Import mail"): there the
-attacker controls the whole raw message, including a forged
-`Authentication-Results: mx.google.com; …` bearing our own authserv-id, and
-nothing at delivery stripped it. The real fix is a retrieval-layer
-delivery-provenance signal, filed as **#14** — not header parsing. Treat this
+**Inserted/imported mail — the provenance gate (#14).** The authserv-id pin
+defends forged AR on *delivered* mail — a message an attacker **sends** carries
+the wrong authserv-id and is rejected. It does **not**, by itself, defend a
+message written directly into the mailbox (`messages.insert` / IMAP `APPEND` /
+"Import mail"): there the attacker controls the whole raw message, including a
+forged `Authentication-Results: mx.google.com; …` bearing our own authserv-id,
+and nothing at delivery stripped it. So trust is additionally gated on a
+**retrieval-layer** signal the raw message can't carry: a sender is granted
+catalogued trust only when the fetched message's Gmail metadata shows it was
+genuinely SMTP-delivered (`resolve_message` / `classify_delivery` read a
+receipt-time `CATEGORY_*` label that insert/import bypass; no signal → fail
+closed to owner-confirm). This is defense-in-depth, not proof (a sophisticated
+inserter that also forges plausible API metadata is out of scope). Treat this
 catalog as a **noise-reducer, not the last line of defense**: the load-bearing
 control for actions on the owner's behalf is the write-gate approval card (#6),
 which fires even for a catalogued sender.
