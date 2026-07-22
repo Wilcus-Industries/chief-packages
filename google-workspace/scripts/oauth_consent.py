@@ -84,22 +84,25 @@ from gw_aliases import _looks_like_email
 
 # Where chief keeps the OAuth *client* config (the desktop-app client id/secret
 # the owner downloads from Google Cloud Console) and the derived per-account
-# tokens. Both live under the secret store, which is gitignored and excluded
-# from backups — these tokens can send mail as the owner.
+# tokens. Both live under the secret store, which is gitignored. These tokens
+# can send mail as the owner, so keep the secret store out of any backup you
+# make of chief's data (core takes none automatically, but an owner-made copy
+# — core's docs/CONFIG.md notes a ``backups/`` convention — would sweep them in).
 DEFAULT_CLIENT_SECRET = "secrets/google_workspace_credentials"
 DEFAULT_CREDENTIALS_DIR = "secrets/google_tokens"
 
 # Core-tier Gmail / Calendar / Drive scopes — the grant the core-tier tools
 # need. openid + userinfo.email identify the account we key the credential by
-# (and return the id_token whose email claim the storage guard checks).
-# Refinable per install; #10/live confirms the exact set the server requires.
+# (and return the id_token whose email claim the storage guard checks). The full
+# ``calendar`` scope subsumes ``calendar.events`` (which is why the latter is not
+# listed). Refinable per install; #10/live confirms the exact minimal set the
+# server requires.
 CORE_SCOPES: tuple[str, ...] = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive.readonly",
 )
@@ -325,7 +328,9 @@ def build_consent_url(
         "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",
-        "include_granted_scopes": "true",
+        # No ``include_granted_scopes``: it would silently widen this token to
+        # whatever the client was ever granted, defeating scope minimization —
+        # we want exactly ``scopes`` (see CORE_SCOPES, finalized live in #10).
         "login_hint": acct,
         "state": state,
         "code_challenge": challenge,

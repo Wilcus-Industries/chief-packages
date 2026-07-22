@@ -189,7 +189,8 @@ uv run python $OC exchange me@company.com "<pasted redirect string>"
 The credential is stored **keyed by email address** (lowercased) as
 `secrets/google_tokens/<address>.json`, written **owner-only (0600)** in a 0700
 dir — these tokens can send mail as the owner, so they live in the secret store
-(gitignored, excluded from backups) with restrictive perms. It is the Google
+(gitignored; keep it out of any backup you make) with restrictive perms. It is
+the Google
 **authorized-user** JSON shape the upstream server reads
 (`from_authorized_user_file`), so the same file consent writes is the file the
 server loads. A **second account** authorizes independently — its own

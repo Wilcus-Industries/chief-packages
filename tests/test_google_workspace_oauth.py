@@ -692,6 +692,65 @@ def test_end_to_end_rejects_forged_state(
     assert not (creds / f"{GRANTED_EMAIL}.json").exists()
 
 
+def test_cli_main_url_then_exchange_round_trip(
+    token_endpoint: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI wiring the skill actually tells the agent to run: `url` then
+    `exchange` through ``main`` against the fixture endpoint, exercising client
+    loading, the stdout URL/path contract, and exit codes (#15.3)."""
+    secret = tmp_path / "client_secret.json"
+    secret.write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "1234.apps.googleusercontent.com",
+                    "client_secret": "shh-secret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        )
+    )
+    os.chmod(secret, 0o600)  # avoid the loose-perms tighten warning
+    creds = tmp_path / "google_tokens"
+
+    rc = oc.main(
+        ["--client", str(secret), "url", GRANTED_EMAIL, "--credentials-dir", str(creds)]
+    )
+    assert rc == 0
+    url = capsys.readouterr().out.strip()
+    state = _state_from_url(url)
+
+    pasted = f"http://localhost/?code=4/0Aauth&state={state}&scope=x"
+    rc = oc.main(
+        [
+            "--client",
+            str(secret),
+            "exchange",
+            GRANTED_EMAIL,
+            pasted,
+            "--credentials-dir",
+            str(creds),
+            "--token-endpoint",
+            token_endpoint,
+        ]
+    )
+    assert rc == 0
+    printed_path = capsys.readouterr().out.strip()
+    assert printed_path.endswith(f"{GRANTED_EMAIL}.json")
+    loaded = load_credential(GRANTED_EMAIL, credentials_dir=creds)
+    assert loaded["refresh_token"] == "1//refresh"
+
+
+def test_cli_main_reports_error_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing client secret file exits non-zero with the reason on stderr —
+    the CLI's error contract (#15.3)."""
+    rc = oc.main(["--client", str(tmp_path / "nope.json"), "url", GRANTED_EMAIL])
+    assert rc == 1
+    assert "oauth_consent:" in capsys.readouterr().err
+
+
 # --- Docs ---------------------------------------------------------------------
 
 
