@@ -19,6 +19,10 @@ cp "$src/SKILL.md" "$dst/SKILL.md"
 # skills/google-workspace/scripts/gw_aliases.py — copy it there so that path
 # exists post-install.
 cp "$here/scripts/gw_aliases.py" "$dst/scripts/gw_aliases.py"
+# tool_gate.py is the read/write tool catalog (#6) — land it at the path the
+# skill/INSTALL document so `uv run python .../tool_gate.py reads` works to list
+# the read tool names to register on the gate's approve set.
+cp "$here/scripts/tool_gate.py" "$dst/scripts/tool_gate.py"
 
 # Seed an empty alias file once. Never clobber an existing one — the owner's
 # name: address aliases are their own data.

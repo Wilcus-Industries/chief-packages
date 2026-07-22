@@ -1,9 +1,10 @@
 # Installing google-workspace
 
-> **Stub.** This slice adds the manifest, its test harness, and the alias-helper
-> install wiring (step 1 below). The rest of the document-driven install is
-> stubbed with `TODO(#N)` pointers to the slices that build each step out. Do
-> not treat it as complete yet.
+> **Stub.** This slice adds the manifest, its test harness, the alias-helper
+> install wiring (step 1), and the gate posture (steps 4–5: the read/write tool
+> split and the write-gate registration). The remaining steps are stubbed with
+> `TODO(#N)` pointers to the slices that build them out. Do not treat the OAuth,
+> server-pin, or bookkeeping steps as complete yet.
 
 Gmail, Calendar, and Drive for chief, via a pinned upstream Google Workspace
 MCP server ([taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp),
@@ -20,14 +21,43 @@ Depends on the `screening` package for that gating.
 3. Owner consent + OAuth. TODO(#8): capture the owner's Google account grant and
    store the OAuth client/credentials under the `google_workspace_credentials`
    secret; record account scope in the `google_workspace` config key.
-4. Tool catalog + read/write split. TODO: enumerate the server's tools and
-   mark which are reads vs. writes.
+4. Tool catalog + read/write split. The server is launched at its `core` tool
+   tier restricted to Gmail / Calendar / Drive — sixteen tools, each classified
+   read vs. write in `skills/google-workspace/scripts/tool_gate.py`. **Reads**
+   (search/list/get mail, events, and Drive files; the existing shareable link)
+   have no side effect and auto-approve. **Writes** send mail, create/modify
+   calendar events, or write to Drive/local disk — including
+   `get_drive_file_download_url`, which lands file bytes on local disk in stdio
+   mode — and always raise the gate's approval card (step 5). List the sets:
+   ```
+   TG=skills/google-workspace/scripts/tool_gate.py
+   uv run python $TG reads          # read tool names to register (step 5)
+   uv run python $TG writes         # write tool names — left OFF, they card
+   ```
    Inbound sender trust (#4): the sender trust catalog
    (`google-workspace/scripts/sender_trust.py`) keys inbound mail on the
    verified auth-result sender — see the skill's "Inbound sender trust" section.
-   Unknown verified senders route to owner-confirm; the gate binding is #6.
-5. Write gate. TODO(#6): bind the write tools to a `screening` approval gate so
-   sending mail / editing events / modifying Drive requires owner confirmation.
+   Unknown verified senders route to owner-confirm; the write gate below is the
+   control that still fires even for a catalogued sender.
+5. Write gate — the read-by-name registration (security-load-bearing). Register
+   the **read** tool names on chief's gate by-name approve set so they
+   auto-approve, and leave every **write** tool OFF it so it raises the approval
+   card. The approve set is `config.yaml`'s `gate.approved` list, which core
+   folds into the live `GatePolicy` at boot. Add the read names to it:
+   ```
+   uv run python skills/google-workspace/scripts/tool_gate.py approved-yaml
+   ```
+   and merge that `gate.approved` block into `config.yaml` (keep any existing
+   entries), then `restart`. **Write tools are deliberately never added.** Under
+   chief's default-ask, empty-list posture a tool that is not on the approve set
+   raises the card every time — so sending mail, creating/modifying events, and
+   Drive/download writes all require an explicit owner "yes" until the owner
+   decides otherwise. This is intentional and load-bearing: per the PRD the gate
+   card is the one control that survives a clever injection. Do **not** add a
+   write tool to `gate.approved` or replace this allowlist posture with a
+   denylist — denial must stay explicit (a tool that nobody allowlisted must
+   still card). The heavier `screening` classification wiring is a separate
+   concern (TODO(#5)); it layers on top of — it does not replace — this card.
 6. Pin + patch the upstream server. TODO(#7): finalize and pin the exact `uvx`
    launch command (currently the well-formed placeholder `uvx workspace-mcp`)
    and record any local patch.
