@@ -4,8 +4,20 @@ dependencies:
   - screening
 mcp_servers:
   google-workspace:
+    # Launch the PINNED, PATCHED upstream checkout that install lands at
+    # data/google-workspace/server (pin: patches/upstream.pin; the patch adds the
+    # Authentication-Results header the sender-trust catalog verifies). Never a
+    # moving branch — the server holds a Gmail send credential. `--frozen` runs
+    # the warmed env from the clone's lockfile so the first connect never races a
+    # dependency resolution. The --tool-tier/--tools flags are load-bearing: they
+    # scope the surface to core-tier Gmail/Calendar/Drive (bare launch registers
+    # every service at every tier ~60 tools) — do NOT drop them when bumping.
     command:
-      - uvx
+      - uv
+      - run
+      - --frozen
+      - --directory
+      - data/google-workspace/server
       - workspace-mcp
       - --tool-tier
       - core

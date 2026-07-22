@@ -1,0 +1,41 @@
+diff --git a/gmail/gmail_helpers.py b/gmail/gmail_helpers.py
+index dd6b9e0..14398ad 100644
+--- a/gmail/gmail_helpers.py
++++ b/gmail/gmail_helpers.py
+@@ -37,6 +37,11 @@ GMAIL_METADATA_HEADERS = [
+     "List-Unsubscribe",
+     "Precedence",
+     "List-Id",
++    # Requested so the Gmail API returns the boundary MTA's authentication
++    # verdict on inbound mail. A downstream consumer keys sender trust on the
++    # authserv-id-pinned Authentication-Results header (SPF/DKIM/DMARC), never
++    # the forgeable From, so it must be in the fetched header set.
++    "Authentication-Results",
+ ]
+ 
+ 
+diff --git a/gmail/gmail_tools.py b/gmail/gmail_tools.py
+index cb95b08..8066e48 100644
+--- a/gmail/gmail_tools.py
++++ b/gmail/gmail_tools.py
+@@ -284,6 +284,7 @@ def _format_message_header_lines(
+     list_unsub = headers.get("List-Unsubscribe", "")
+     precedence = headers.get("Precedence", "")
+     list_id = headers.get("List-Id", "")
++    authentication_results = headers.get("Authentication-Results", "")
+ 
+     content_lines = []
+     if message_id:
+@@ -313,6 +314,12 @@ def _format_message_header_lines(
+         content_lines.append(f"Precedence: {precedence}")
+     if list_id:
+         content_lines.append(f"List-Id: {list_id}")
++    if authentication_results:
++        # The verified-sender trust catalog parses this header (authserv-id
++        # pinned; SPF/DKIM/DMARC) off the read output, so it must be surfaced.
++        content_lines.append(
++            f"Authentication-Results: {authentication_results}"
++        )
+ 
+     return content_lines
+ 

@@ -155,8 +155,12 @@ never replaces it.
 
 - Owner consent + OAuth credentials live in the `google_workspace_credentials`
   secret. TODO(#8).
-- The server launches via `uvx workspace-mcp --tool-tier core --tools gmail
-  drive calendar`, so only the `core`-tier Gmail / Calendar / Drive tools are
-  registered (without the flags upstream exposes every service at every tier).
-  TODO(#7): pin the exact `workspace-mcp` version; keep the tier/service flags.
+- The server launches from a **pinned + patched** upstream checkout via `uv run
+  --frozen --directory data/google-workspace/server workspace-mcp --tool-tier
+  core --tools gmail drive calendar`, so only the `core`-tier Gmail / Calendar /
+  Drive tools are registered (without the flags upstream exposes every service at
+  every tier). The pin (tag + commit) is in `patches/upstream.pin`; install
+  clones it, applies `patches/0001-authentication-results-headers.patch` (which
+  surfaces the `Authentication-Results` header the sender-trust catalog verifies)
+  fail-loud, and warms deps — see INSTALL.md step 6.
 - Version + uninstall bookkeeping. TODO(#9).
