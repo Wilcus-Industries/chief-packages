@@ -151,10 +151,74 @@ Inbound Gmail content is additionally screened at the post-tool `Annotate` seam
 (see "Screening inbound mail" above); that screen layers on top of this card and
 never replaces it.
 
+## Authorizing an account (consent by paste)
+
+chief's daemon host has no browser and runs no OAuth callback listener, so an
+account is authorized by **paste**, not by a redirect chief catches. The
+`scripts/oauth_consent.py` helper (stdlib-only, run through the **shell** tool
+from the run root) carries the whole flow — build the consent URL, take the
+pasted redirect back, exchange the code, and write the per-account credential:
+
+```
+OC=skills/google-workspace/scripts/oauth_consent.py
+uv run python $OC url me@company.com          # -> the consent URL to hand the owner
+uv run python $OC exchange me@company.com "<pasted redirect string>"
+```
+
+1. **Build the consent URL.** `url <account>` prints a Google consent URL for
+   that address — offline access (so the credential keeps working unattended),
+   with the account as `login_hint`. It also issues a random `state` and a PKCE
+   `code_verifier` for this session, persisted `0600` under `--credentials-dir`
+   (default `secrets/google_tokens`) so the later paste can be checked against
+   the session that started. The OAuth **client** it uses (the **Desktop app**
+   client id/secret — a `web` client is rejected) is read from the
+   `google_workspace_credentials` secret.
+2. **Owner consents wherever they have a browser.** They open the URL on any
+   device, approve, and their browser lands on an (unreachable)
+   `http://localhost/?code=…&state=…` — nothing listens there; the point is the
+   string in the address bar. They **copy that whole address bar** and paste it
+   back into chat.
+3. **Exchange + store.** `exchange <account> "<pasted string>"` parses the
+   `code` and `state` out of the paste (a malformed paste — no URL, no `code`, or
+   an `error=access_denied` from a declined consent — is **rejected with a clear
+   error**, never a silent empty exchange), **verifies the `state` matches** the
+   one `url` issued for this account (a forged or cross-session paste is refused),
+   exchanges the code with the session's PKCE verifier at Google's token endpoint,
+   and — only after the returned `id_token`'s email claim matches `<account>`
+   (**anti-fixation**: a consent that authorized a *different* Google account is
+   refused, never bound under the owner's key) — writes the credential. Run `url`
+   and `exchange` with the **same** `--credentials-dir`.
+
+The credential is stored **keyed by email address** (lowercased) as
+`secrets/google_tokens/<address>.json`, written **owner-only (0600)** in a 0700
+dir — these tokens can send mail as the owner, so they live in the secret store
+(gitignored, excluded from backups) with restrictive perms. It is the Google
+**authorized-user** JSON shape the upstream server reads
+(`from_authorized_user_file`), so the same file consent writes is the file the
+server loads. A **second account** authorizes independently — its own
+`<address>.json` — without touching the first.
+
+> **Credentials-dir coupling (#7).** The upstream `workspace-mcp` server reads
+> per-account credentials from its own credentials directory. #7 points that
+> directory at `secrets/google_tokens/` (or run consent with `--credentials-dir`
+> set to wherever the server reads) when the server version is pinned, so the two
+> agree on where the `<address>.json` files live.
+
+> **Mock-debt (#8 → #10).** The token exchange speaks the real OAuth2 code grant
+> — pointed at Google's `token_uri` it is live. This slice was built and tested
+> against a **fixture** token endpoint (`--token-endpoint`); the live Google
+> exchange (real client, real consent screen, real refresh token) is exercised
+> in **#10**. The anti-fixation check decodes the `id_token`'s email claim
+> **without** JWKS signature verification — safe because the id_token comes from
+> the trusted token endpoint, not the pasted string; full JWKS signature
+> verification against Google's public keys also lands in **#10**.
+
 ## Setup, at a glance
 
-- Owner consent + OAuth credentials live in the `google_workspace_credentials`
-  secret. TODO(#8).
+- Owner consent + OAuth credentials: authorize each account by paste (see
+  "Authorizing an account" above). The OAuth **client** lives in the
+  `google_workspace_credentials` secret; the per-account tokens land under
+  `secrets/google_tokens/`.
 - The server launches from a **pinned + patched** upstream checkout via `uv run
   --frozen --directory data/google-workspace/server workspace-mcp --tool-tier
   core --tools gmail drive calendar`, so only the `core`-tier Gmail / Calendar /
