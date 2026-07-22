@@ -50,7 +50,54 @@ line rather than guessing:
 ## Reading
 
 Read tools (list/search mail, read events, list Drive files) are open — no gate.
-TODO(#4): catalog the exact read tools this server exposes.
+TODO: catalog the exact read tools this server exposes (read/write tool split).
+
+## Inbound sender trust
+
+Inbound mail is untrusted until proven otherwise. chief keeps a **sender trust
+catalog** — a per-sender tier table, ported from core's iMessage sender
+whitelist — that answers "is this sender really who they claim to be" before any
+prompt sees the message. It is keyed on the **authenticated** sender parsed from
+the message's `Authentication-Results` headers (SPF/DKIM/DMARC), **never** the
+forgeable `From`:
+
+- A message whose auth-result headers fail verification is **not** treated as a
+  known sender — even if its `From` names a catalogued address (a spoof).
+- A verified sender that is catalogued resolves to its tier.
+- A verified sender that is **not** catalogued is logged **metadata-only** (its
+  envelope facts, never the body) and routed to the owner-confirm flow; once the
+  owner confirms, it is catalogued at a tier and future verified mail resolves.
+
+Two fail-closed boundaries keep the auth verdicts themselves honest (RFC 8601
+§5/§7):
+
+- **authserv-id pinning.** Only an `Authentication-Results` header whose
+  authserv-id matches *our* boundary MTA is trusted — it must match
+  `google_workspace.trusted_authserv_id` (default `mx.google.com`, overridable
+  per install; a blank/misconfigured id fails closed). An AR header bearing a
+  *different* authserv-id — upstream, or forged on mail an attacker **sends** —
+  is ignored. No matching boundary header ⇒ unverified.
+- **DMARC alignment.** SPF/DKIM authenticate a *domain*, not the `From` local
+  part, so an identity is trusted only when an explicit `dmarc=pass` asserts
+  `From` alignment. A bare SPF/DKIM pass with DMARC absent ⇒ unverified (else a
+  shared/multi-tenant domain could authenticate any address at that domain).
+
+**Residual limitation (tracked in #14).** The authserv-id pin defends forged AR
+on *delivered* mail — a message an attacker **sends** carries the wrong
+authserv-id and is rejected. It does **not** defend a message written directly
+into the mailbox (`messages.insert` / IMAP `APPEND` / "Import mail"): there the
+attacker controls the whole raw message, including a forged
+`Authentication-Results: mx.google.com; …` bearing our own authserv-id, and
+nothing at delivery stripped it. The real fix is a retrieval-layer
+delivery-provenance signal, filed as **#14** — not header parsing. Treat this
+catalog as a **noise-reducer, not the last line of defense**: the load-bearing
+control for actions on the owner's behalf is the write-gate approval card (#6),
+which fires even for a catalogued sender.
+
+Implementation: `google-workspace/scripts/sender_trust.py`
+(`verified_sender`, `SenderTrustCatalog`, `resolve_sender`). The catalog is the
+deterministic layer; binding its `owner_confirm` decision to the actual approval
+gate is the write-gate slice's job (see below).
 
 ## Writing is gated
 

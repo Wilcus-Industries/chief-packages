@@ -98,13 +98,23 @@ def _ensure_core_on_path() -> bool:
 CORE_AVAILABLE: bool = _ensure_core_on_path()
 
 
-# The google-workspace alias module (slice #3) is a stdlib-only, pure-logic
-# helper living under the package dir. Put its ``scripts/`` on ``sys.path`` so
-# tests import it by bare name (``import gw_aliases``) — the same import-time
-# mechanism used for core above, and needing no core checkout.
-_gw_scripts = str(repo_root() / "google-workspace" / "scripts")
-if _gw_scripts not in sys.path:
-    sys.path.insert(0, _gw_scripts)
+def _package_scripts_on_path(package: str) -> None:
+    """Put a package's ``scripts/`` dir on ``sys.path`` so its sandbox-run
+    modules import bare in tests (e.g. ``import gw_aliases`` / ``sender_trust``).
+
+    The package dirs are hyphenated (not importable as packages), so their
+    scripts are reached the same way core is: by path insertion, at import
+    time. Slices that ship testable package code (google-workspace #3–#6) reuse
+    this instead of each re-deriving the path.
+    """
+    scripts = repo_root() / package / "scripts"
+    if scripts.is_dir():
+        src = str(scripts)
+        if src not in sys.path:
+            sys.path.insert(0, src)
+
+
+_package_scripts_on_path("google-workspace")
 
 
 @pytest.fixture
