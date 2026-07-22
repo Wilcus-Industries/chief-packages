@@ -17,7 +17,8 @@ Depends on the `screening` package for that gating.
    `name: address` account aliases — and seeds the inbound-Gmail screening
    classifier into `classifiers/gmail-inbound-screen.md` (never clobbered; pass
    `GATE_MODEL=<model-id>` to pin a guard model other than the default
-   `openai/gpt-4.1-nano`).
+   `openai/gpt-4.1-nano` — the value must be a plain model id, characters
+   outside `[A-Za-z0-9._:/-]` are rejected).
 2. Install `screening` first if it isn't already — writes route through it, and
    inbound Gmail content is screened before the model reads it. That screen is
    the manifest's `hooks:` block (`scripts/gmail_screen.py`): a `post_tool` hook

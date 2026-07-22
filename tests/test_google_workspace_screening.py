@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -211,6 +212,38 @@ def test_gmail_read_predicate() -> None:
     assert not is_gmail_read("list_calendar_events")
 
 
+# --- Fix 1: the predicate fails CLOSED under tool-catalog drift ---------------
+
+
+def test_gmail_read_screens_future_read_tool_without_content_hint() -> None:
+    # Catalog-drift guard: the upstream MCP server pin is versionless, so a
+    # restart can pull a Gmail read tool whose name carries none of the old
+    # content|search|message|thread hints. It must still be screened — dropping
+    # the content-hint *requirement* is what makes the screen fail closed.
+    assert is_gmail_read("mcp_google-workspace_fetch_gmail_inbox")
+    assert is_gmail_read("get_gmail_attachment")  # no content-hint keyword
+    assert is_gmail_read("list_gmail_labels")  # a read; harmless over-scoping
+
+
+def test_gmail_read_screens_important_not_excluded_by_import_substring() -> None:
+    # Word/token-boundary write matching: ``import`` ⊂ ``important`` must NOT
+    # exclude an attacker-content read. A bare-substring write check would have
+    # wrongly skipped this label-scoped inbox read.
+    assert is_gmail_read("list_gmail_important_messages")
+    assert is_gmail_read("get_gmail_important_messages")
+
+
+def test_gmail_read_excludes_writes_by_token_boundary() -> None:
+    # Genuine writes/mutations stay excluded — their result is a confirmation of
+    # the owner's own action, not inbound content. Matched as whole tokens.
+    assert not is_gmail_read("send_gmail_message")
+    assert not is_gmail_read("draft_gmail_message")
+    assert not is_gmail_read("modify_gmail_message_labels")
+    assert not is_gmail_read("manage_gmail_label")
+    assert not is_gmail_read("delete_gmail_message")
+    assert not is_gmail_read("trash_gmail_message")
+
+
 def test_non_gmail_tool_result_is_not_screened(core_available: bool) -> None:
     _require_core(core_available)
     # Even a provider that would flag everything must not touch a non-Gmail
@@ -260,3 +293,57 @@ def test_classifier_definition_targets_inbound_gmail(core_available: bool) -> No
 
     # The def is well-formed by core's REAL classifier validator.
     assert validate(root) == []
+
+
+# --- Fix 2: a missing classifier def is surfaced loudly at boot --------------
+
+
+def test_register_logs_error_when_classifier_def_missing(
+    core_available: bool,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _require_core(core_available)
+    from chief.classifiers import Classifier, ClassifierRegistry
+    from chief.hooks import HookRegistry, PackageHookRegistrar
+
+    # A REAL Classifier whose registry dir holds no defs → definition() is None,
+    # exactly the installed-but-unseeded/deleted state. register() must shout at
+    # boot rather than let every future read fail safe to clean in silence.
+    empty = Classifier(
+        _ReplyProvider(CLEAN), ClassifierRegistry(tmp_path), "openai/gpt-4.1-nano"
+    )
+    registry = HookRegistry()
+    with caplog.at_level(logging.ERROR):
+        register(
+            SimpleNamespace(classifier=empty),
+            PackageHookRegistrar(registry, "google-workspace"),
+        )
+
+    # The broken state is surfaced loudly at boot, naming the missing def...
+    assert any(
+        r.levelno == logging.ERROR and CLASSIFIER_NAME in r.getMessage()
+        for r in caplog.records
+    ), "expected a boot ERROR naming the missing classifier def"
+    # ...and the hook is STILL wired, so per-read fail-safe-to-clean is unchanged.
+    assert registry.post_tool() is not None
+
+
+def test_register_is_quiet_when_classifier_def_present(
+    core_available: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _require_core(core_available)
+    from chief.hooks import HookRegistry, PackageHookRegistrar
+
+    classifier = _classifier(_ReplyProvider(CLEAN))  # over the REAL def dir
+    registry = HookRegistry()
+    with caplog.at_level(logging.ERROR):
+        register(
+            SimpleNamespace(classifier=classifier),
+            PackageHookRegistrar(registry, "google-workspace"),
+        )
+
+    # The def exists, so boot is silent — no false alarm — and the hook is wired.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert registry.post_tool() is not None

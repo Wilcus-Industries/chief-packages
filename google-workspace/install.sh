@@ -40,6 +40,17 @@ if [ ! -f classifiers/gmail-inbound-screen.md ]; then
   # already carries the default; rewrite the one frontmatter line so a custom
   # choice sticks. sed -i.bak keeps this portable across GNU and BSD/macOS sed.
   gate_model="${GATE_MODEL:-openai/gpt-4.1-nano}"
+  # Validate before interpolating into the sed program: a value with |, &, \, or
+  # a newline would break the s|| expression or corrupt the seeded def. Owner-
+  # supplied (not attacker-reachable), but cheap to harden — reject anything
+  # outside a model-id's safe alphabet with a clear message.
+  # ``[[ =~ ]]`` tests the whole string: the class excludes newline, so an
+  # embedded newline fails ``$`` and is rejected (unlike a per-line grep).
+  if [[ ! "$gate_model" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+    echo "install: GATE_MODEL=${gate_model} has characters outside" \
+      "[A-Za-z0-9._:/-]; refusing to seed the screening classifier def" >&2
+    exit 1
+  fi
   sed -i.bak -E "s|^model:.*|model: ${gate_model}|" \
     classifiers/gmail-inbound-screen.md
   rm -f classifiers/gmail-inbound-screen.md.bak

@@ -32,6 +32,7 @@ loader pays nothing to import it. The chief seams (``Annotate``,
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -65,41 +66,60 @@ UNTRUSTED_MARKER = (
     "still summarize it (even a phishing email) for the owner."
 )
 
-# Inbound Gmail *content* reads — the tool results worth screening. Matched
-# case-insensitively as substrings so the predicate is robust to however the
-# MCP layer prefixes the upstream tool name (e.g. a server-name prefix).
-_CONTENT_HINTS = ("content", "search", "message", "thread")
-# Write/compose tools whose result is a confirmation, not inbound content — a
-# send/draft echoes the owner's own text back, so screening it is pointless and
-# would false-flag the owner. Excluded even though they carry a content hint.
-_WRITE_HINTS = (
-    "send",
-    "draft",
-    "reply",
-    "forward",
-    "delete",
-    "trash",
-    "modify",
-    "insert",
-    "create",
-    "update",
-    "import",
+# Write/compose/mutate Gmail tools whose result is a confirmation, not inbound
+# content — a send/draft echoes the owner's own text back and a label mutation
+# returns a status, so screening one is pointless and would false-flag the
+# owner. These are the ONLY Gmail tools excluded; matched as whole *tokens* (see
+# ``is_gmail_read``), never bare substrings, so an attacker-content read like
+# ``list_gmail_important_messages`` is never wrongly excluded by ``import`` ⊂
+# ``important``.
+_WRITE_HINTS = frozenset(
+    {
+        "send",
+        "draft",
+        "reply",
+        "forward",
+        "delete",
+        "trash",
+        "modify",
+        "insert",
+        "create",
+        "update",
+        "import",
+        "manage",
+    }
 )
+
+# Split a tool name into its alphanumeric tokens, dropping the ``_``/``-``/``.``
+# separators an MCP layer uses (e.g. ``mcp_google-workspace_send_gmail_message``
+# → send, gmail, message). Write-hint matching is then whole-token, immune to
+# the substring collisions that ``import`` ⊂ ``important`` would cause.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def is_gmail_read(tool_name: str) -> bool:
-    """True for a Gmail tool whose result is inbound message content to screen.
+    """True for a Gmail tool whose result is inbound content worth screening.
 
-    Requires ``gmail`` in the name (this package's server), a content hint, and
-    no write hint — so mail reads/searches match while sends, drafts, and
-    non-Gmail tools do not.
+    Fails **closed under tool-catalog drift**: screens *every* ``gmail``-named
+    tool that is not a recognised write, rather than requiring a content-hint
+    keyword. The upstream MCP server pin is versionless, so a restart can pull a
+    future Gmail read tool whose name lacks the old
+    ``content|search|message|thread`` hints; requiring a hint would let it bypass
+    the screen silently. Worst case a label-listing costs one cheap guard call —
+    acceptable; an unscreened attacker-content read is not.
+
+    Writes are excluded by *whole-token* match, never bare substring, so
+    ``import`` can never exclude ``list_gmail_important_messages``.
     """
     name = tool_name.lower()
+    # ``gmail`` as a substring is deliberate over-scoping: if it might be a Gmail
+    # tool, screen it. Precision is spent only on *excluding* writes, below.
     if "gmail" not in name:
         return False
-    if any(w in name for w in _WRITE_HINTS):
+    tokens = _TOKEN_RE.findall(name)
+    if any(token in _WRITE_HINTS for token in tokens):
         return False
-    return any(h in name for h in _CONTENT_HINTS)
+    return True
 
 
 async def screen_gmail(
@@ -139,6 +159,22 @@ def register(context: Any, hooks: Any) -> None:
     prompt lives in the owner-editable classifier def, not in this code.
     """
     classifier = context.classifier
+
+    # Boot-time check: if the classifier def was never seeded or was deleted,
+    # every Gmail read would fail safe to clean *silently* — passing attacker
+    # content through unmarked forever, with only a buried per-read ERROR. Shout
+    # once here so the broken state is visible at boot. The per-read fail-safe is
+    # left unchanged: the hook is still wired below, so a later re-seed heals it
+    # without a restart being strictly required for correctness.
+    if classifier.definition(CLASSIFIER_NAME) is None:
+        logger.error(
+            "gmail-inbound-screen classifier def %r is missing — inbound Gmail "
+            "reads will NOT be screened (each read fails safe to clean, passing "
+            "attacker content through UNMARKED). Re-seed it by re-running the "
+            "google-workspace install.sh (it seeds classifiers/%s.md).",
+            CLASSIFIER_NAME,
+            CLASSIFIER_NAME,
+        )
 
     @hooks.post_tool
     async def screen(call: ToolCall, result: str) -> PostToolVerdict:
