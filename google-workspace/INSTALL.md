@@ -12,11 +12,20 @@ Depends on the `screening` package for that gating.
 
 1. Run `bash data/packages/google-workspace/install.sh` with the `shell` tool.
    It copies the skill and the bundled `gw_aliases.py` to
-   `skills/google-workspace/scripts/` (the path the skill documents) and
-   scaffolds an empty `data/google-workspace/aliases.txt` — edit that file to
-   add your `name: address` account aliases.
-2. Install `screening` first if it isn't already — writes route through it.
-   TODO(#5): document the screening wiring for this server's write tools.
+   `skills/google-workspace/scripts/` (the path the skill documents), scaffolds
+   an empty `data/google-workspace/aliases.txt` — edit that file to add your
+   `name: address` account aliases — and seeds the inbound-Gmail screening
+   classifier into `classifiers/gmail-inbound-screen.md` (never clobbered; pass
+   `GATE_MODEL=<model-id>` to pin a guard model other than the default
+   `openai/gpt-4.1-nano`).
+2. Install `screening` first if it isn't already — writes route through it, and
+   inbound Gmail content is screened before the model reads it. That screen is
+   the manifest's `hooks:` block (`scripts/gmail_screen.py`): a `post_tool` hook
+   that runs each Gmail content read through the seeded classifier at chief's
+   `Annotate` seam — flagged mail is fenced with an untrusted marker (never
+   dropped), a screener error fails safe to clean. It loads automatically once
+   the package is recorded in `data/installed.yaml` (step 7). See the skill's
+   "Screening inbound mail before the model reads it" section.
 3. Owner consent + OAuth. TODO(#8): capture the owner's Google account grant and
    store the OAuth client/credentials under the `google_workspace_credentials`
    secret; record account scope in the `google_workspace` config key.

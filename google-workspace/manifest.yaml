@@ -14,3 +14,6 @@ config_keys:
 secrets:
   - google_workspace_credentials
 python_deps: []
+hooks:
+  module: scripts/gmail_screen.py
+  register: register
