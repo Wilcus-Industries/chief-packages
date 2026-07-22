@@ -30,27 +30,43 @@ Depends on the `screening` package for that gating.
    the package is recorded in `data/installed.yaml` (step 7). See the skill's
    "Screening inbound mail before the model reads it" section.
 3. Owner consent + OAuth (consent by paste). First place the OAuth **client**:
-   download a **desktop** OAuth client JSON from Google Cloud Console and save it
-   as the `google_workspace_credentials` secret (`secrets/google_workspace_credentials`).
-   Then authorize each account by paste — chief's host runs no callback
-   listener, so consent comes back as a pasted redirect string, not a caught
-   redirect:
+   download a **Desktop app** OAuth client JSON from Google Cloud Console and save
+   it as the `google_workspace_credentials` secret
+   (`secrets/google_workspace_credentials`) — a **web** client is rejected, it
+   needs the loopback redirect a Desktop client uses. This file holds the
+   `client_id` + `client_secret`, and `secrets/` is often `0755`, so **tighten it**
+   right after saving:
+   ```
+   chmod 600 secrets/google_workspace_credentials
+   ```
+   (`oauth_consent.py` also warns and re-tightens to `0600` on load if it finds
+   the file group/other-readable.) Then authorize each account by paste — chief's
+   host runs no callback listener, so consent comes back as a pasted redirect
+   string, not a caught redirect:
    ```
    OC=skills/google-workspace/scripts/oauth_consent.py
    uv run python $OC url me@company.com          # consent URL to hand the owner
    uv run python $OC exchange me@company.com "<pasted redirect string>"
    ```
    The owner opens the URL on any device, consents, and pastes back the whole
-   `http://localhost/?code=…` their browser lands on; `exchange` parses the
-   code (a malformed paste is rejected), exchanges it, and writes the credential
-   **keyed by address** to `secrets/google_tokens/<address>.json` — owner-only
-   (0600) in a 0700 dir, in the Google authorized-user shape the upstream server
-   reads. A second account authorizes independently. **Coupling (#7):** point the
-   pinned `workspace-mcp` server's credentials directory at `secrets/google_tokens/`
-   (or override this package's dir via the `google_workspace` config key) so the
-   server loads the same files consent writes. **Mock-debt (#8 → #10):** the
-   exchange was built/tested against a fixture token endpoint; the live Google
-   exchange lands in #10.
+   `http://localhost/?code=…` their browser lands on; `exchange` parses the code
+   (a malformed paste is rejected), verifies the pasted `state` against the
+   session `url` issued, exchanges it with the session's PKCE verifier, and — only
+   after the returned `id_token`'s email claim matches the address — writes the
+   credential **keyed by address** to `secrets/google_tokens/<address>.json` —
+   owner-only (0600) in a 0700 dir, in the Google authorized-user shape the
+   upstream server reads. A consent that authorized a **different** Google account
+   is refused (anti-fixation), never stored under the requested address. A second
+   account authorizes independently. Run `url` and `exchange` with the **same**
+   `--credentials-dir` (default `secrets/google_tokens`), since `url` persists the
+   session's state/PKCE there for `exchange` to check. **Coupling (#7):** the
+   pinned `workspace-mcp` server reads per-account credentials from its own
+   credentials directory; #7 points that directory at `secrets/google_tokens/`
+   (or run consent with `--credentials-dir` set to wherever the server reads) so
+   the server loads the same files consent writes. **Mock-debt (#8 → #10):** the
+   exchange was built/tested against a fixture token endpoint, and the `id_token`
+   email claim is decoded **without** JWKS signature verification; the live Google
+   exchange and full JWKS signature verification land in #10.
 4. Tool catalog + read/write split. The manifest command launches the server
    with `--tool-tier core --tools gmail drive calendar`, so it registers only
    the `core`-tier Gmail / Calendar / Drive tools — sixteen, each classified
