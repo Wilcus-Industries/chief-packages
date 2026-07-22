@@ -15,6 +15,7 @@ from textwrap import dedent
 from sender_trust import (
     Action,
     SenderTrustCatalog,
+    parse_authentication_results,
     resolve_sender,
     verified_sender,
 )
@@ -151,6 +152,51 @@ GENUINE_AR_CASE_AND_VERSION = _msg(
     Date: Mon, 21 Jul 2026 09:26:00 -0700
     Message-ID: <case-1@example.com>
     Authentication-Results: MX.GOOGLE.COM 1 (added by boundary);
+        spf=pass smtp.mailfrom=alice@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+# A forged AR whose authserv-id is EMPTY (just a leading ';'). If a future
+# config wiring yields a blank/None trusted_authserv_id, an exact-match on ""
+# would trust this forgery — the empty-id pin must fail closed instead.
+FORGED_EMPTY_AUTHSERV = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: wire the money now
+    Date: Mon, 21 Jul 2026 09:30:00 -0700
+    Message-ID: <forged-empty@evil.test>
+    Authentication-Results: ;
+        spf=pass smtp.mailfrom=alice@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+# Two authserv-ids that resemble the trusted mx.google.com but differ in format:
+# a hyphen for the second dot, and a trailing suffix. An exact-match pin (not a
+# substring / prefix match) must reject both.
+FORGED_LOOKALIKE_AUTHSERV = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: wire the money now
+    Date: Mon, 21 Jul 2026 09:32:00 -0700
+    Message-ID: <lookalike-1@evil.test>
+    Authentication-Results: mx-google.com;
+        spf=pass smtp.mailfrom=alice@example.com;
+        dmarc=pass header.from=example.com
+    """
+)
+
+FORGED_SUFFIX_AUTHSERV = _msg(
+    """
+    From: Alice Example <alice@example.com>
+    To: owner@chief.test
+    Subject: wire the money now
+    Date: Mon, 21 Jul 2026 09:34:00 -0700
+    Message-ID: <suffix-1@evil.test>
+    Authentication-Results: mx.google.com.evil;
         spf=pass smtp.mailfrom=alice@example.com;
         dmarc=pass header.from=example.com
     """
@@ -356,6 +402,39 @@ def test_trusted_authserv_id_is_configurable() -> None:
         verified_sender(FORGED_AR_WRONG_AUTHSERV, trusted_authserv_id="attacker.test")
         == "alice@example.com"
     )
+
+
+def test_blank_trusted_authserv_id_fails_closed() -> None:
+    # A blank/whitespace/None trusted_authserv_id (e.g. a future config wiring
+    # yields "") must trust NOTHING — not match a forged empty-authserv-id AR.
+    # Without the guard, "" == "" trusts the forgery and authenticates Alice.
+    blanks: tuple[str | None, ...] = ("", "   ", None)
+    for blank in blanks:
+        assert parse_authentication_results(FORGED_EMPTY_AUTHSERV, blank) == []
+        assert verified_sender(FORGED_EMPTY_AUTHSERV, trusted_authserv_id=blank) is None
+        decision = resolve_sender(
+            FORGED_EMPTY_AUTHSERV,
+            _catalog(),  # knows alice@example.com
+            trusted_authserv_id=blank,
+        )
+        # From names the catalogued Alice, but nothing is authenticated ->
+        # owner-confirm, never her tier.
+        assert decision.verified_sender is None
+        assert decision.tier is None
+        assert decision.action is Action.OWNER_CONFIRM
+
+
+def test_lookalike_authserv_id_is_rejected() -> None:
+    # The pin is an exact match, not a substring/prefix/suffix one: an id that
+    # only resembles mx.google.com (a hyphen, or a trailing suffix) is a
+    # different, attacker-chosen authserv-id and must fail closed.
+    assert verified_sender(FORGED_LOOKALIKE_AUTHSERV) is None
+    assert verified_sender(FORGED_SUFFIX_AUTHSERV) is None
+    for raw in (FORGED_LOOKALIKE_AUTHSERV, FORGED_SUFFIX_AUTHSERV):
+        decision = resolve_sender(raw, _catalog())
+        assert decision.verified_sender is None
+        assert decision.tier is None
+        assert decision.action is Action.OWNER_CONFIRM
 
 
 # --- Security fix 2: an unaligned SPF/DKIM pass without DMARC is not trusted -

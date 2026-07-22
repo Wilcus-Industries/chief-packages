@@ -37,16 +37,28 @@ forgeable `From`:
 Two fail-closed boundaries keep the auth verdicts themselves honest (RFC 8601
 §5/§7):
 
-- **authserv-id pinning.** Only the `Authentication-Results` header added by
-  *our* boundary MTA is trusted — its authserv-id must match
+- **authserv-id pinning.** Only an `Authentication-Results` header whose
+  authserv-id matches *our* boundary MTA is trusted — it must match
   `google_workspace.trusted_authserv_id` (default `mx.google.com`, overridable
-  per install). Any other AR header — upstream, or attacker-inserted on mail
-  with no genuine boundary AR (`messages.insert` / IMAP `APPEND` / "Import
-  mail") — is forgeable and ignored. No boundary header ⇒ unverified.
+  per install; a blank/misconfigured id fails closed). An AR header bearing a
+  *different* authserv-id — upstream, or forged on mail an attacker **sends** —
+  is ignored. No matching boundary header ⇒ unverified.
 - **DMARC alignment.** SPF/DKIM authenticate a *domain*, not the `From` local
   part, so an identity is trusted only when an explicit `dmarc=pass` asserts
   `From` alignment. A bare SPF/DKIM pass with DMARC absent ⇒ unverified (else a
   shared/multi-tenant domain could authenticate any address at that domain).
+
+**Residual limitation (tracked in #14).** The authserv-id pin defends forged AR
+on *delivered* mail — a message an attacker **sends** carries the wrong
+authserv-id and is rejected. It does **not** defend a message written directly
+into the mailbox (`messages.insert` / IMAP `APPEND` / "Import mail"): there the
+attacker controls the whole raw message, including a forged
+`Authentication-Results: mx.google.com; …` bearing our own authserv-id, and
+nothing at delivery stripped it. The real fix is a retrieval-layer
+delivery-provenance signal, filed as **#14** — not header parsing. Treat this
+catalog as a **noise-reducer, not the last line of defense**: the load-bearing
+control for actions on the owner's behalf is the write-gate approval card (#6),
+which fires even for a catalogued sender.
 
 Implementation: `google-workspace/scripts/sender_trust.py`
 (`verified_sender`, `SenderTrustCatalog`, `resolve_sender`). The catalog is the

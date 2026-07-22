@@ -17,22 +17,37 @@ resolve to that sender's tier.
 That rule only holds if the AR verdicts are themselves trustworthy, so two
 fail-closed boundaries protect the parse (both RFC 8601 §5/§7):
 
-- **authserv-id pinning.** Only the AR header added by *our* boundary MTA
-  (``google_workspace.trusted_authserv_id``, default ``mx.google.com``) is
-  read. Any other AR header — upstream, or attacker-inserted on mail with no
-  genuine boundary AR (``messages.insert`` / IMAP ``APPEND`` / "Import mail") —
-  is forgeable and ignored. This assumes the boundary MTA strips inbound AR
-  headers bearing its own authserv-id before adding its genuine one, which
-  Google does; without a boundary AR the message fails closed to ``None``.
+- **authserv-id pinning.** Only the AR header whose authserv-id matches *our*
+  boundary MTA (``google_workspace.trusted_authserv_id``, default
+  ``mx.google.com``) is read; an AR header bearing a *different* authserv-id —
+  upstream, or attacker-forged on mail the attacker **sends** — is ignored, and
+  a blank/absent trusted id fails closed to ``None``. This assumes the boundary
+  MTA strips inbound AR headers bearing its own authserv-id before adding its
+  genuine one, which Google does.
 - **DMARC alignment.** SPF/DKIM authenticate a *domain*, not the ``From`` local
   part, so an identity is trusted only when an explicit ``dmarc=pass`` asserts
   ``From`` alignment. Absent DMARC → ``None`` (see ``verified_sender``).
 
-Scope note: this module is the trust catalog + verified-sender resolution only.
-Reads are open; binding the write tools to a screening/approval gate lands in the
-later google-workspace slices (#5 screening, #6 write-gate). ``resolve_sender``
-emits the *decision* (allow a known sender, or route an unknown one to the
-owner-confirm flow); wiring that decision into core's gate is #6's job.
+**Residual limitation (tracked in #14).** The authserv-id pin defends forged AR
+on *delivered* mail: a message an attacker **sends** carries the wrong
+authserv-id (or none) and is rejected. It does **not** defend a message written
+directly into the mailbox — ``messages.insert`` (the Gmail API insert scope),
+IMAP ``APPEND``, or "Import mail" — because there the attacker controls the
+entire raw message, including a forged ``Authentication-Results: mx.google.com;
+…`` bearing *our* authserv-id, and nothing at delivery stripped it. This module
+cannot distinguish that from a genuine boundary header. The real fix is a
+retrieval-layer delivery-provenance signal (does this message have a true
+delivery record?), filed as **#14** — not header parsing. Do not read this
+catalog as closing that vector.
+
+Scope note: this module is the trust catalog + verified-sender resolution only,
+and it is a **noise-reducer, not the last line of defense**. Reads are open;
+the load-bearing control for *actions* on the owner's behalf is the write-gate
+approval card (#6), which still fires even for a catalogued sender. Binding the
+write tools to that screening/approval gate lands in the later google-workspace
+slices (#5 screening, #6 write-gate). ``resolve_sender`` emits the *decision*
+(allow a known sender, or route an unknown one to the owner-confirm flow);
+wiring that decision into core's gate is #6's job.
 
 Stdlib for parsing (``email``); PyYAML for the human-editable catalog file, which
 chief maintains under its config the way core keeps ``imessage.owner_handles``.
@@ -61,13 +76,15 @@ _FAIL = "fail"
 
 # The ``Authentication-Results`` header is only trustworthy when it was added at
 # *our* trust boundary. RFC 8601 §5/§7: a consumer MUST pin its own authserv-id
-# and MUST ignore AR headers not added by its boundary MTA — any other AR header
-# (upstream, or attacker-inserted via ``messages.insert`` / IMAP ``APPEND`` /
-# "Import mail") is forgeable and its verdicts are worthless. For these Gmail
-# Workspace accounts the receiving MTA is Google, so the boundary authserv-id
-# defaults to ``mx.google.com``; the owner can override it via the
-# ``google_workspace.trusted_authserv_id`` config key when mail arrives behind a
-# different boundary MTA.
+# and MUST ignore AR headers bearing a *different* authserv-id — an upstream or
+# attacker-forged header on mail the attacker SENDS carries the wrong id and its
+# verdicts are worthless. For these Gmail Workspace accounts the receiving MTA is
+# Google, so the boundary authserv-id defaults to ``mx.google.com``; the owner
+# can override it via the ``google_workspace.trusted_authserv_id`` config key
+# when mail arrives behind a different boundary MTA. Note the pin does NOT catch
+# a message written directly into the mailbox (``messages.insert`` / IMAP
+# ``APPEND`` / "Import mail"), which can carry a forged AR bearing *our* own
+# authserv-id — a residual limitation tracked in #14 (see the module docstring).
 CONFIG_KEY_TRUSTED_AUTHSERV_ID = "google_workspace.trusted_authserv_id"
 DEFAULT_TRUSTED_AUTHSERV_ID = "mx.google.com"
 
@@ -159,9 +176,15 @@ def parse_authentication_results(
     ``Authentication-Results`` header is forgeable and ignored (RFC 8601 §5/§7).
     The **topmost** matching header wins. When *no* header matches, returns
     ``[]`` — fail closed: nothing was authenticated at our boundary.
+
+    A blank / whitespace-only / ``None`` ``trusted_authserv_id`` (e.g. a missing
+    or empty config value) fails closed to ``[]`` — it trusts nothing rather
+    than exact-matching a forged empty ("``;``") authserv-id.
     """
     msg = message_from_string(raw_message)
-    trusted = trusted_authserv_id.strip().lower()
+    trusted = (trusted_authserv_id or "").strip().lower()
+    if not trusted:
+        return []  # no trusted authserv-id configured -> trust nothing
     for header in msg.get_all("Authentication-Results", []):
         authserv_id, results = _parse_one_header(str(header))
         if authserv_id == trusted:
@@ -195,10 +218,17 @@ def verified_sender(
 
     Two fail-closed trust boundaries gate the answer:
 
-    1. **authserv-id pinning** (RFC 8601 §5/§7). Only the ``Authentication-
-       Results`` header added by our own boundary MTA (``trusted_authserv_id``,
-       default ``mx.google.com``) is read; forged / upstream AR headers are
-       ignored. No boundary header on the message → ``None``.
+    1. **authserv-id pinning** (RFC 8601 §5/§7). Only an ``Authentication-
+       Results`` header whose authserv-id matches our boundary MTA
+       (``trusted_authserv_id``, default ``mx.google.com``) is read; an AR
+       header bearing a *different* authserv-id — forged on mail the attacker
+       sends, or upstream — is ignored, and a blank ``trusted_authserv_id``
+       fails closed. No matching boundary header → ``None``. **Caveat:** this
+       does *not* defend a message written straight into the mailbox
+       (``messages.insert`` / IMAP ``APPEND`` / "Import mail") with a forged AR
+       bearing our *own* authserv-id — a residual limitation tracked in #14;
+       the load-bearing control for actions is the write-gate approval card
+       (#6), not this catalog.
     2. **DMARC alignment.** The identity comes from a passing SPF
        (``smtp.mailfrom``) or DKIM (``header.i`` / ``header.d``) mechanism —
        never the forgeable ``From`` — but SPF/DKIM authenticate the envelope /
