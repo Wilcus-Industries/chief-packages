@@ -13,13 +13,37 @@ from __future__ import annotations
 from textwrap import dedent
 
 from sender_trust import (
+    DEFAULT_TRUSTED_AUTHSERV_ID,
     Action,
+    DeliveryProvenance,
     SenderTrustCatalog,
+    TrustDecision,
     _strip_comments,
+    classify_delivery,
     parse_authentication_results,
+    resolve_message,
     resolve_sender,
     verified_sender,
 )
+
+# Delivered metadata: a Gmail receipt-time CATEGORY_* label insert/import cannot
+# earn. Used to isolate the AR-trust logic from the #14 provenance gate.
+_DELIVERED_META: dict[str, object] = {"labelIds": ["INBOX", "CATEGORY_PERSONAL"]}
+
+
+def _resolve(
+    raw_message: str,
+    catalog: SenderTrustCatalog,
+    trusted_authserv_id: str | None = DEFAULT_TRUSTED_AUTHSERV_ID,
+) -> TrustDecision:
+    """Resolve as a genuinely SMTP-delivered message, so the AR-logic tests below
+    are not conflated with the #14 provenance gate (covered separately)."""
+    return resolve_sender(
+        raw_message,
+        catalog,
+        trusted_authserv_id,
+        provenance=DeliveryProvenance.SMTP_DELIVERED,
+    )
 
 
 def _msg(headers: str, body: str = "the secret body — never logged\n") -> str:
@@ -263,7 +287,7 @@ def test_verified_sender_is_the_envelope_not_the_from_header() -> None:
 
 def test_lookup_keys_on_verified_sender_not_from() -> None:
     cat = _catalog()  # knows alice@example.com
-    decision = resolve_sender(ENVELOPE_NOT_FROM, cat)
+    decision = _resolve(ENVELOPE_NOT_FROM, cat)
     # From matches a catalogued address, but the verified sender is mallory,
     # who is unknown — so this must NOT resolve to Alice's tier.
     assert decision.verified_sender == "mallory@example.com"
@@ -280,7 +304,7 @@ def test_failed_auth_is_not_verified() -> None:
 
 def test_failed_auth_not_matched_even_when_from_is_catalogued() -> None:
     cat = _catalog()  # knows alice@example.com
-    decision = resolve_sender(SPOOF_AUTH_FAILS, cat)
+    decision = _resolve(SPOOF_AUTH_FAILS, cat)
     assert decision.verified_sender is None
     assert decision.tier is None
     assert not decision.known
@@ -308,7 +332,7 @@ def test_dmarc_fail_overrides_a_passing_mechanism() -> None:
 
 
 def test_known_verified_sender_resolves_to_tier() -> None:
-    decision = resolve_sender(KNOWN_VERIFIED, _catalog())
+    decision = _resolve(KNOWN_VERIFIED, _catalog())
     assert decision.verified_sender == "alice@example.com"
     assert decision.tier == "trusted"
     assert decision.known
@@ -318,7 +342,7 @@ def test_known_verified_sender_resolves_to_tier() -> None:
 
 
 def test_unknown_verified_sender_is_metadata_only_and_owner_confirm() -> None:
-    decision = resolve_sender(UNKNOWN_VERIFIED, _catalog())
+    decision = _resolve(UNKNOWN_VERIFIED, _catalog())
     assert decision.verified_sender == "bob@stranger.test"
     assert decision.tier is None
     assert not decision.known
@@ -341,10 +365,10 @@ def test_owner_confirm_adds_sender_at_a_tier() -> None:
     # The owner-confirm flow's terminal action: catalog the now-approved sender
     # so the next verified message from them resolves to a tier.
     cat = _catalog()
-    assert resolve_sender(UNKNOWN_VERIFIED, cat).action is Action.OWNER_CONFIRM
+    assert _resolve(UNKNOWN_VERIFIED, cat).action is Action.OWNER_CONFIRM
 
     cat.set_tier("bob@stranger.test", "known")
-    after = resolve_sender(UNKNOWN_VERIFIED, cat)
+    after = _resolve(UNKNOWN_VERIFIED, cat)
     assert after.tier == "known"
     assert after.action is Action.ALLOW
 
@@ -360,7 +384,7 @@ def test_forged_ar_with_wrong_authserv_id_is_ignored() -> None:
 
 def test_forged_ar_does_not_resolve_a_catalogued_from() -> None:
     cat = _catalog()  # knows alice@example.com
-    decision = resolve_sender(FORGED_AR_WRONG_AUTHSERV, cat)
+    decision = _resolve(FORGED_AR_WRONG_AUTHSERV, cat)
     # From names the catalogued Alice and the forged AR says pass, but the
     # header wasn't added at our boundary -> unverified -> owner-confirm.
     assert decision.verified_sender is None
@@ -371,13 +395,13 @@ def test_forged_ar_does_not_resolve_a_catalogued_from() -> None:
 
 def test_no_boundary_ar_fails_closed() -> None:
     assert verified_sender(NO_BOUNDARY_AR) is None
-    assert resolve_sender(NO_BOUNDARY_AR, _catalog()).action is Action.OWNER_CONFIRM
+    assert _resolve(NO_BOUNDARY_AR, _catalog()).action is Action.OWNER_CONFIRM
 
 
 def test_genuine_boundary_ar_is_trusted() -> None:
     # A real mx.google.com boundary header authenticates the catalogued sender.
     assert verified_sender(KNOWN_VERIFIED) == "alice@example.com"
-    assert resolve_sender(KNOWN_VERIFIED, _catalog()).action is Action.ALLOW
+    assert _resolve(KNOWN_VERIFIED, _catalog()).action is Action.ALLOW
 
 
 def test_authserv_id_match_ignores_case_and_version() -> None:
@@ -389,7 +413,7 @@ def test_forged_ar_above_genuine_does_not_win() -> None:
     # A forged attacker.test header prepended above the genuine mx.google.com
     # one claims Alice; only the boundary header (mallory) may be read.
     assert verified_sender(FORGED_ABOVE_GENUINE) == "mallory@example.com"
-    decision = resolve_sender(FORGED_ABOVE_GENUINE, _catalog())
+    decision = _resolve(FORGED_ABOVE_GENUINE, _catalog())
     assert decision.verified_sender == "mallory@example.com"
     assert decision.tier is None
     assert decision.action is Action.OWNER_CONFIRM
@@ -413,7 +437,7 @@ def test_blank_trusted_authserv_id_fails_closed() -> None:
     for blank in blanks:
         assert parse_authentication_results(FORGED_EMPTY_AUTHSERV, blank) == []
         assert verified_sender(FORGED_EMPTY_AUTHSERV, trusted_authserv_id=blank) is None
-        decision = resolve_sender(
+        decision = _resolve(
             FORGED_EMPTY_AUTHSERV,
             _catalog(),  # knows alice@example.com
             trusted_authserv_id=blank,
@@ -432,7 +456,7 @@ def test_lookalike_authserv_id_is_rejected() -> None:
     assert verified_sender(FORGED_LOOKALIKE_AUTHSERV) is None
     assert verified_sender(FORGED_SUFFIX_AUTHSERV) is None
     for raw in (FORGED_LOOKALIKE_AUTHSERV, FORGED_SUFFIX_AUTHSERV):
-        decision = resolve_sender(raw, _catalog())
+        decision = _resolve(raw, _catalog())
         assert decision.verified_sender is None
         assert decision.tier is None
         assert decision.action is Action.OWNER_CONFIRM
@@ -449,7 +473,7 @@ def test_unaligned_spf_without_dmarc_is_not_trusted() -> None:
 
 def test_shared_domain_spf_no_dmarc_routes_to_owner_confirm() -> None:
     cat = SenderTrustCatalog({"victim@shared.test": "trusted"})
-    decision = resolve_sender(SHARED_DOMAIN_SPF_NO_DMARC, cat)
+    decision = _resolve(SHARED_DOMAIN_SPF_NO_DMARC, cat)
     # Even though victim@shared.test is catalogued and SPF passed, the absent
     # DMARC alignment means we cannot trust the local part -> owner-confirm.
     assert decision.verified_sender is None
@@ -481,13 +505,13 @@ def test_dkim_domain_only_identity_is_domain_level() -> None:
 def test_dkim_domain_identity_matches_domain_catalog_not_per_address() -> None:
     # A DKIM-domain-only sender matches a domain-level catalog entry but NOT a
     # per-address entry — DKIM alone must not silently match a mailbox (#13.1).
-    by_domain = resolve_sender(
+    by_domain = _resolve(
         DKIM_DOMAIN_ONLY, SenderTrustCatalog({"@example.com": "trusted"})
     )
     assert by_domain.action is Action.ALLOW
     assert by_domain.tier == "trusted"
 
-    by_address = resolve_sender(
+    by_address = _resolve(
         DKIM_DOMAIN_ONLY, SenderTrustCatalog({"alice@example.com": "trusted"})
     )
     assert by_address.action is Action.OWNER_CONFIRM
@@ -502,3 +526,50 @@ def test_strip_comments_honors_quoted_string() -> None:
     assert _strip_comments("keep (drop \" this) tail") == "keep  tail"
     # Backslash-escaped quote inside a quoted-string stays inside the quote.
     assert _strip_comments('v="a\\"b(c)" z') == 'v="a\\"b(c)" z'
+
+
+# --- #14: retrieval-layer provenance gate vs forged AR on inserted mail --------
+
+
+def test_classify_delivery_reads_category_labels() -> None:
+    # A Gmail receipt-time CATEGORY_* label (insert/import bypass classification)
+    # is positive delivery evidence; its absence is UNKNOWN, not proof, so it
+    # fails closed.
+    assert (
+        classify_delivery({"labelIds": ["INBOX", "CATEGORY_UPDATES"]})
+        is DeliveryProvenance.SMTP_DELIVERED
+    )
+    assert classify_delivery({"labelIds": ["INBOX", "UNREAD"]}) is (
+        DeliveryProvenance.UNKNOWN
+    )
+    assert classify_delivery({}) is DeliveryProvenance.UNKNOWN
+
+
+def test_inserted_message_with_valid_ar_is_not_trusted() -> None:
+    """The #14 core case: a catalogued, AR-valid message that was NOT
+    SMTP-delivered (inserted/imported — no delivery classification) is routed to
+    owner-confirm regardless of its embedded mx.google.com AR."""
+    inserted_meta = {"labelIds": ["INBOX"]}  # no CATEGORY_* -> UNKNOWN provenance
+    decision = resolve_message(KNOWN_VERIFIED, inserted_meta, _catalog())
+    # The AR still authenticates alice (so the metadata log records her)...
+    assert decision.verified_sender == "alice@example.com"
+    # ...but provenance is not SMTP_DELIVERED, so trust is denied.
+    assert decision.tier is None
+    assert decision.action is Action.OWNER_CONFIRM
+
+
+def test_delivered_message_resolves_normally() -> None:
+    """A genuinely delivered (CATEGORY_*-classified) catalogued sender still
+    resolves to ALLOW — the gate does not break the happy path."""
+    decision = resolve_message(KNOWN_VERIFIED, _DELIVERED_META, _catalog())
+    assert decision.verified_sender == "alice@example.com"
+    assert decision.tier == "trusted"
+    assert decision.action is Action.ALLOW
+
+
+def test_resolve_sender_defaults_fail_closed() -> None:
+    """resolve_sender's default provenance is UNKNOWN — a caller that forgets to
+    supply a provenance signal never grants catalogued trust."""
+    decision = resolve_sender(KNOWN_VERIFIED, _catalog())
+    assert decision.action is Action.OWNER_CONFIRM
+    assert decision.tier is None
