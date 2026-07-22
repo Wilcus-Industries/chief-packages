@@ -65,6 +65,26 @@ def _looks_like_email(value: str) -> bool:
     return bool(local) and "." in domain and not domain.startswith(".")
 
 
+def _validate_alias_name(name: str) -> None:
+    """Reject names that break the ``parse(x.serialize())`` round-trip.
+
+    ``parse`` can never emit such names (a ``#`` line is skipped as a comment,
+    ``:`` is the separator, newlines split lines), so this only bites the public
+    ``AliasFile.__init__`` constructor — but a name that serializes to a comment
+    or re-parses as a different entry would silently corrupt the mapping.
+    """
+    if name.startswith(_COMMENT):
+        raise AliasFileError(
+            f"alias name {name!r} may not start with {_COMMENT!r} "
+            "(it would serialize as a comment and vanish on re-parse)"
+        )
+    if _SEP in name or "\n" in name or "\r" in name:
+        raise AliasFileError(
+            f"alias name {name!r} may not contain {_SEP!r} or a newline "
+            "(it would mis-parse on re-read)"
+        )
+
+
 class AliasFile:
     """An immutable friendly-name -> address map with strict resolution."""
 
@@ -75,9 +95,27 @@ class AliasFile:
             addr = address.strip()
             if not key:
                 raise AliasFileError("alias name must be non-empty")
+            _validate_alias_name(key)
+            if key in validated:
+                raise AliasFileError(
+                    f"duplicate alias name {key!r} (names collide after trimming)"
+                )
             if not _looks_like_email(addr):
                 raise AliasFileError(f"{addr!r} is not an email address")
             validated[key] = addr
+        # An entry whose *name* equals another entry's *address* is unreachable
+        # as an alias: ``resolve`` checks exact-address pass-through first, so
+        # the name silently resolves to itself instead of its alias target.
+        # Refuse the overlap rather than shadow. Case-folded to match resolve's
+        # address-membership check.
+        addr_folds = {a.casefold() for a in validated.values()}
+        for key in validated:
+            if key.casefold() in addr_folds:
+                raise AliasFileError(
+                    f"alias name {key!r} is also an account address in the file "
+                    "— it would be shadowed by exact-address pass-through; "
+                    "rename the alias"
+                )
         self._entries = validated
 
     @property
@@ -100,11 +138,19 @@ class AliasFile:
                 )
             name, _, address = line.partition(_SEP)
             name = name.strip()
+            addr = address.strip()
             if not name:
                 raise AliasFileError(f"line {lineno}: empty alias name")
             if name in entries:
                 raise AliasFileError(f"line {lineno}: duplicate alias {name!r}")
-            entries[name] = address.strip()
+            # Validate the address in the parse loop so a bad address reports its
+            # line number, matching every other parse diagnostic (the
+            # constructor re-checks, but without a line number to attach).
+            if not _looks_like_email(addr):
+                raise AliasFileError(
+                    f"line {lineno}: {addr!r} is not an email address"
+                )
+            entries[name] = addr
         return cls(entries)
 
     def serialize(self) -> str:
@@ -128,9 +174,13 @@ class AliasFile:
                 "fallback is unset — pass an explicit account (alias or address)"
             )
         key = account.strip()
-        if key in self._entries.values():
-            return key
         folded = key.casefold()
+        # Address pass-through is case-folded to match the alias-name lookup
+        # below (addresses are effectively case-insensitive), so a known address
+        # in any case resolves to its canonical stored form rather than raising.
+        addr_by_fold = {addr.casefold(): addr for addr in self._entries.values()}
+        if folded in addr_by_fold:
+            return addr_by_fold[folded]
         matches = {
             addr for name, addr in self._entries.items() if name.casefold() == folded
         }
