@@ -1,6 +1,6 @@
 # chief-packages
 
-Capability packages for [chief](https://github.com/CrazyWillBear/chief), the
+Capability packages for [chief](https://github.com/Wilcus-Industries/chief), the
 self-editing personal-agent daemon. chief clones this repo into
 `data/packages/` the first time its `chief-pkg` CLI runs, and discovers these
 packages alongside the ones bundled in core. Bundled packages win a name
