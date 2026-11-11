@@ -10,11 +10,13 @@ restart) reattaches to it instead of killing the owner's logged-in browser.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -30,6 +32,47 @@ def chrome_binary() -> str:
     if found is None:
         raise RuntimeError("Google Chrome not found")
     return found
+
+
+# Profile prefs that switch off UI Chrome draws outside the page — invisible
+# to the phone, so each one would wedge a login on the unwatched Mac. 2=block.
+PROFILE_PREFS: dict[str, Any] = {
+    "signin": {"allowed": False},  # no "Sign in to Chrome?" intercept
+    "credentials_enable_service": False,  # no "Save password?" bubble
+    "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+    "profile": {
+        "password_manager_enabled": False,
+        "default_content_setting_values": {
+            "notifications": 2,
+            "geolocation": 2,
+            "media_stream_camera": 2,
+            "media_stream_mic": 2,
+        },
+    },
+}
+
+
+def _merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def apply_profile_prefs(profile: Path) -> None:
+    """Merge PROFILE_PREFS into the profile's Preferences. Only while Chrome is
+    not running — Chrome rewrites the file from memory on exit."""
+    path = profile / "Default" / "Preferences"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        current = json.loads(path.read_text())
+    except (OSError, ValueError):
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    path.write_text(json.dumps(_merge(current, PROFILE_PREFS)))
 
 
 def chrome_args(profile: Path, port: int) -> list[str]:
@@ -64,7 +107,7 @@ async def ensure_chrome(profile: Path, port: int, wait: float = 20) -> None:
     """Start Chrome unless one already answers on ``port``."""
     if await cdp_up(port):
         return
-    profile.mkdir(parents=True, exist_ok=True)
+    apply_profile_prefs(profile)
     subprocess.Popen(
         [chrome_binary(), *chrome_args(profile, port)],
         stdin=subprocess.DEVNULL,

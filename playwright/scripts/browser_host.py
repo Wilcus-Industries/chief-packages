@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from cdp_client import CdpConnection, close_tab, create_tab, page_ws_url
+from cdp_input import LOGIN_TAB_SETUP
 from chrome_launch import ensure_chrome, keep_chrome_alive
 from login_bridge import run_bridge
 from login_sessions import TTL_SECONDS, SessionStore
@@ -45,6 +46,26 @@ PUBLIC_BASE = PUBLIC_BASE.rstrip("/")
 
 store = SessionStore()
 mcp = FastMCP("browser-login")
+# token -> the login tab's CDP session, held open for the tab's whole life:
+# LOGIN_TAB_SETUP (the passkey block) only lasts while a session is attached.
+_tabs: dict[str, CdpConnection] = {}
+
+
+async def _tab_connection(token: str, target_id: str) -> CdpConnection:
+    conn = _tabs.get(token)
+    if conn is None or conn.closed:
+        conn = await CdpConnection.open(await page_ws_url(CDP_PORT, target_id))
+        for method, params in LOGIN_TAB_SETUP:
+            await conn.send(method, params)
+        _tabs[token] = conn
+    return conn
+
+
+async def _finish(token: str, target_id: str) -> None:
+    conn = _tabs.pop(token, None)
+    if conn is not None:
+        await conn.close()
+    await close_tab(CDP_PORT, target_id)
 
 
 @mcp.tool()
@@ -58,7 +79,11 @@ async def login_link(url: str) -> str:
     if urlsplit(url).scheme not in ("http", "https"):
         return "error: url must be http(s)"
     await ensure_chrome(PROFILE, CDP_PORT)
-    session = store.mint(await create_tab(CDP_PORT, url), url)
+    # Open blank, attach the passkey block, then load the site — so even a
+    # passkey prompt fired on page load never reaches the Mac's native UI.
+    session = store.mint(await create_tab(CDP_PORT, "about:blank"), url)
+    conn = await _tab_connection(session.token, session.target_id)
+    await conn.send("Page.navigate", {"url": url})
     minutes = TTL_SECONDS // 60
     return (
         f"{PUBLIC_BASE}/s/{session.token}\n"
@@ -87,14 +112,11 @@ async def open_session(token: str, websocket: WebSocket) -> None:
     if session is None:
         await websocket.close(code=4410)
         return
-    cdp = await CdpConnection.open(await page_ws_url(CDP_PORT, session.target_id))
-    try:
-        outcome = await run_bridge(cdp, _Phone(websocket))
-    finally:
-        await cdp.close()
+    cdp = await _tab_connection(token, session.target_id)
+    outcome = await run_bridge(cdp, _Phone(websocket))
     if outcome == "done":
         store.end(token)
-        await close_tab(CDP_PORT, session.target_id)
+        await _finish(token, session.target_id)
         with contextlib.suppress(Exception):
             await websocket.send_json({"t": "ended"})
             await websocket.close()
@@ -104,7 +126,7 @@ async def _sweep_expired(every: float = 30) -> None:
     while True:
         await asyncio.sleep(every)
         for session in store.sweep_expired():
-            await close_tab(CDP_PORT, session.target_id)
+            await _finish(session.token, session.target_id)
 
 
 async def main() -> None:

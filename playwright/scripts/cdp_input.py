@@ -26,6 +26,12 @@ _KEYS: dict[str, tuple[str, int, str | None]] = {
     "ArrowDown": ("ArrowDown", 40, None),
 }
 
+# Run on a login tab's CDP session for its whole life. Passkey requests go to
+# an empty virtual authenticator instead of the macOS passkey sheet / iCloud
+# Keychain / Bluetooth prompts the phone can't see; the request fails and the
+# site offers its in-page fallback ("Try another way").
+LOGIN_TAB_SETUP: list[Command] = [("WebAuthn.enable", {"enableUI": False})]
+
 RESET_VIEWPORT: list[Command] = [
     ("Emulation.clearDeviceMetricsOverride", {}),
     ("Emulation.setTouchEmulationEnabled", {"enabled": False}),

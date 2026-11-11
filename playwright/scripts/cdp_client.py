@@ -59,6 +59,10 @@ class CdpConnection:
         )
         return await future
 
+    @property
+    def closed(self) -> bool:
+        return self._reader is None or self._reader.done()
+
     async def next_event(self) -> dict[str, Any]:
         return await self._events.get()
 

@@ -261,3 +261,46 @@ def test_websocket_requires_the_claim_cookie() -> None:
             ws.receive_json()
     assert refused.value.code == 4403
     assert opened == [session.token]
+
+
+# --- native-UI suppression -------------------------------------------------
+#
+# The phone sees only page pixels. Anything Chrome or macOS draws outside the
+# page (passkey sheets, "Sign in to Chrome?", save-password bubbles, permission
+# prompts) appears on the unwatched Mac and wedges the login.
+
+
+def test_login_tabs_route_passkeys_to_an_empty_virtual_authenticator() -> None:
+    from cdp_input import LOGIN_TAB_SETUP
+
+    assert ("WebAuthn.enable", {"enableUI": False}) in LOGIN_TAB_SETUP
+
+
+def test_profile_prefs_turn_off_native_prompts_without_clobbering(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from chrome_launch import apply_profile_prefs
+
+    prefs = tmp_path / "Default" / "Preferences"
+    prefs.parent.mkdir()
+    prefs.write_text(json.dumps({"profile": {"name": "chief"}, "keep": 1}))
+    apply_profile_prefs(tmp_path)
+    data = json.loads(prefs.read_text())
+    assert data["keep"] == 1 and data["profile"]["name"] == "chief"
+    assert data["signin"]["allowed"] is False
+    assert data["credentials_enable_service"] is False
+    assert data["profile"]["password_manager_enabled"] is False
+    blocked = data["profile"]["default_content_setting_values"]
+    assert blocked["notifications"] == 2 and blocked["geolocation"] == 2
+
+
+def test_profile_prefs_create_a_fresh_profile(tmp_path: Path) -> None:
+    import json
+
+    from chrome_launch import apply_profile_prefs
+
+    apply_profile_prefs(tmp_path / "new")
+    data = json.loads((tmp_path / "new" / "Default" / "Preferences").read_text())
+    assert data["signin"]["allowed"] is False
