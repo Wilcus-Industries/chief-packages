@@ -2,7 +2,8 @@
 # Deterministic install for whisper: install whisper.cpp + ffmpeg, download
 # the base model, and copy the skill verbatim. Nothing interactive.
 #
-# Paths are relative to the repo root. Requires Homebrew (macOS/Linuxbrew).
+# Sources come from this script's own dir (wherever the package is
+# cloned); destination paths are relative to the repo root. Requires Homebrew (macOS/Linuxbrew).
 set -euo pipefail
 
 # whisper-cli (whisper.cpp) — the local transcriber; ffmpeg — audio convert.
@@ -18,11 +19,12 @@ if [ ! -f "$model" ]; then
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
 fi
 
-src="packages/whisper/skills/whisper"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="$here/skills/whisper"
 dst="skills/whisper"
 mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
 
 # Record the install in the registry so discovery and the hooks loader see
 # it — the one bookkeeping step that must never be left to hand-editing.
-uv run python -m chief.registry_apply whisper --source bundled
+uv run python -m chief.registry_apply whisper --source cloned

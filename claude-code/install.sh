@@ -3,7 +3,8 @@
 # itself is a machine prerequisite (see INSTALL.md), deliberately NOT
 # installed here — auth is interactive and owner-owned.
 #
-# Paths are relative to the repo root.
+# Sources come from this script's own dir (wherever the package is
+# cloned); destination paths are relative to the repo root.
 set -euo pipefail
 
 # Warn (don't fail) if the CLI isn't visible — the skill refuses to run
@@ -13,11 +14,12 @@ if ! command -v claude >/dev/null 2>&1; then
     "relying on this package (see INSTALL.md)" >&2
 fi
 
-src="packages/claude-code/skills/claude-code"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="$here/skills/claude-code"
 dst="skills/claude-code"
 mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
 
 # Record the install in the registry so discovery and the hooks loader see
 # it — the one bookkeeping step that must never be left to hand-editing.
-uv run python -m chief.registry_apply claude-code --source bundled
+uv run python -m chief.registry_apply claude-code --source cloned

@@ -3,14 +3,16 @@
 # Python-dependency self-edit (adding ddgs to pyproject) is NOT here — the
 # agent does it from INSTALL.md, guarded by the done-check.
 #
-# Paths are relative to the repo root.
+# Sources come from this script's own dir (wherever the package is
+# cloned); destination paths are relative to the repo root.
 set -euo pipefail
 
-src="packages/duckduckgo-search/skills/duckduckgo-search"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="$here/skills/duckduckgo-search"
 dst="skills/duckduckgo-search"
 mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
 
 # Record the install in the registry so discovery and the hooks loader see
 # it — the one bookkeeping step that must never be left to hand-editing.
-uv run python -m chief.registry_apply duckduckgo-search --source bundled
+uv run python -m chief.registry_apply duckduckgo-search --source cloned
