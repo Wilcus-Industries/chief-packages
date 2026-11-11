@@ -1,14 +1,22 @@
 ---
 name: playwright
-description: Drive a real Chrome through the playwright MCP tools (mcp_playwright_browser_*) — JS-heavy pages, sites the owner has logged chief into, forms. When a site needs a login, mint a phone login link with mcp_browser-login_login_link and text it to the owner.
+description: Drive a real Chrome through the playwright MCP tools (mcp_playwright_browser_*) — JS-heavy pages, sites the owner has logged chief into, forms. When a site needs a login, mint a phone login link with mcp_playwright_login_link and text it to the owner.
 ---
 
 # playwright — a real browser, logged in as the owner
 
-The `mcp_playwright_browser_*` tools drive one Google Chrome window (on the Mac's screen; nobody watches it) on a
-**persistent, chief-only profile** (`data/playwright/profile`). The
-browser-login server keeps that Chrome running; cookies survive restarts, so a
-site the owner logged into stays logged in until the site expires the session.
+The `mcp_playwright_browser_*` tools drive one Google Chrome window (on the
+Mac's screen; nobody watches it) on a **persistent, chief-only profile**
+(`data/playwright/profile`). Cookies survive restarts, so a site the owner
+logged into stays logged in — for **every** session — until the site expires
+it.
+
+**This session has its own tab.** Other sessions browse in their own tabs at
+the same time; you never see or touch theirs, and they never touch yours.
+Your tab closes after 10 minutes without a browser call (the next call opens
+a fresh one, still logged in), and `browser_close` closes just yours — do
+that when you're done. Opening or switching tabs is refused: navigate in your
+tab instead. If a link opens a new tab, navigate your tab to that URL.
 
 ## When to use
 
@@ -31,7 +39,7 @@ logged-in session in play.
 
 Never ask the owner for a password, and never type one yourself.
 
-1. Call `mcp_browser-login_login_link` with the site's login URL. It opens the
+1. Call `mcp_playwright_login_link` with the site's login URL. It opens the
    page in a new tab of chief's browser and returns a one-time link.
 2. Text the owner the link and what it's for ("Log me into Amazon: <link>").
    They open it on their phone, see the live page, log in by hand (password,
@@ -40,8 +48,8 @@ Never ask the owner for a password, and never type one yourself.
    you're logged in.
 
 The link works once, from one phone, for 15 minutes, and only over the
-owner's tailnet. Don't drive the browser while a login is in progress — it is
-the same browser. If a link expired or was used, mint a new one.
+owner's tailnet. The login happens in its own tab, so your tab is untouched.
+If a link expired or was used, mint a new one.
 
 ## The gate
 

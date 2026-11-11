@@ -37,7 +37,7 @@ absence is the completion signal.
 - **duckduckgo-search** — Free web search (text/news) via the ddgs CLI — no API key.
 - **maps** — Geocoding, nearby places, routes, and timezones via OpenStreetMap/OSRM — keyless, stdlib-only.
 - **ocr-and-documents** — Extract text from PDFs, DOCX, and EPUBs (pymupdf, python-docx) — chief's only way to read documents.
-- **playwright** — Drive a real Chrome via the Playwright MCP server, on a persistent chief-only profile; log it into sites from your phone via one-time links over the tailnet. Actions raise approval cards.
+- **playwright** — Drive a real Chrome via the Playwright MCP server — one tab per chief session on a shared, persistent profile; log it into sites from your phone via one-time links over the tailnet. Actions raise approval cards.
 - **skill-maker** — How chief authors its own skills and packages — structure, validators, and writing-quality rules for crystallizing a workflow into a SKILL.md.
 - **whisper** — Local speech-to-text with whisper.cpp — transcribe voice memos and audio/video files the owner sends.
 - **youtube-content** — Fetch YouTube transcripts and turn them into summaries, chapters, or quotes.

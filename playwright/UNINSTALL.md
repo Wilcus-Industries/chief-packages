@@ -1,8 +1,8 @@
 # Uninstalling playwright
 
-1. From `config.yaml`, remove `mcp_servers.playwright` and
-   `mcp_servers.browser-login`, every `mcp_playwright_*` entry and
-   `mcp_browser-login_login_link` in `gate.approved` and `gate.never`, and
+1. From `config.yaml`, remove `mcp_servers.playwright` (and a leftover
+   `mcp_servers.browser-login`), every `mcp_playwright_*` entry (and
+   `mcp_browser-login_login_link`) in `gate.approved` and `gate.never`, and
    `mcp_playwright_*` from `typesafe.screen_tools` (list them with
    `uv run python skills/playwright/scripts/playwright_tools.py reads` /
    `never`). Keep every other entry.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Deterministic install for playwright: npm-install the PINNED @playwright/mcp
 # into data/playwright/server, create the profile/output/workspace dirs, land
-# the skill + its scripts (incl. the browser-login server), optionally mount
-# the login viewer on the tailnet, wire config.yaml (both servers, gate lists,
-# screening) through playwright_tools.py, and register the package.
+# the skill + its scripts (the browser host: shared Chrome, one Playwright
+# child per chief session, phone login viewer), optionally mount the login
+# viewer on the tailnet, wire config.yaml (the server, gate lists, screening)
+# through playwright_tools.py, and register the package.
 #
 # Parameters (env):
 #   TAILSCALE_SERVE=1  run `tailscale serve --bg --set-path /browser` so login
@@ -45,9 +46,9 @@ dst="skills/playwright"
 mkdir -p "$dst/scripts"
 cp "$here/skills/playwright/SKILL.md" "$dst/SKILL.md"
 rm -f "$dst/scripts/login.sh" "$dst/scripts/login.mjs"  # pre-viewer leftovers
-for f in playwright_tools.py browser_host.py cdp_client.py cdp_input.py \
-  chrome_launch.py login_bridge.py login_sessions.py login_viewer.py \
-  login_viewer.html; do
+for f in playwright_tools.py browser_host.py browser_pool.py playwright_child.py \
+  login_host.py cdp_client.py cdp_input.py chrome_launch.py login_bridge.py \
+  login_sessions.py login_viewer.py login_viewer.html; do
   cp "$here/scripts/$f" "$dst/scripts/$f"
 done
 

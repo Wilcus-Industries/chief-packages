@@ -46,11 +46,13 @@ from typing import Any
 MCP_SERVER_NAME = "playwright"
 PIN = "0.0.85"
 SCREEN_PATTERN = f"mcp_{MCP_SERVER_NAME}_*"
-CONNECT_TIMEOUT_SECONDS = 60
-# The browser-login server (scripts/browser_host.py) owns the one Chrome both
-# chief and the owner's phone use; playwright-mcp attaches to it over CDP.
-LOGIN_SERVER_NAME = "browser-login"
-LOGIN_LINK_TOOL = f"mcp_{LOGIN_SERVER_NAME}_login_link"
+CONNECT_TIMEOUT_SECONDS = 90
+# The one server (scripts/browser_host.py) owns the shared Chrome, one
+# Playwright child per chief session, and the phone login viewer.
+LOGIN_LINK_TOOL = f"mcp_{MCP_SERVER_NAME}_login_link"
+# The pre-per-session layout ran a second server; wire removes its traces.
+OLD_LOGIN_SERVER = "browser-login"
+OLD_LOGIN_LINK_TOOL = f"mcp_{OLD_LOGIN_SERVER}_login_link"
 CDP_PORT = 9322
 VIEWER_PORT = 8131
 
@@ -152,41 +154,32 @@ def data_dir(root: Path) -> Path:
 def server_entry(root: Path, host: Host) -> dict[str, Any]:
     """The ``mcp_servers.playwright`` entry, with absolute paths under ``root``.
 
-    Attaches over CDP to the Chrome the browser-login server keeps running on
-    the persistent chief-only profile, so logins the owner makes from their
-    phone are the same cookies chief browses with. ``cwd`` is a dedicated
-    workspace dir: the server confines file access (explicitly named
-    screenshots, uploads) to its cwd, which must not be the chief repo.
-    ``PATH`` leads with node's dir because the server binary is a node script.
+    chief's venv python runs the installed ``browser_host.py``. It keeps one
+    Chrome on the persistent chief-only profile (one set of logins, shared by
+    every session), gives each chief session its own Playwright child and tab
+    (``session_context`` tells it which session is calling), and serves the
+    phone login viewer. Children run in ``WORKSPACE`` — they confine file
+    access to their cwd, which must not be the chief repo — with node's dir
+    leading ``PATH`` because the Playwright server is a node script.
     """
     base = data_dir(root)
-    return {
-        "command": [
-            str(base / "server" / "node_modules" / ".bin" / "playwright-mcp"),
-            "--cdp-endpoint",
-            f"http://127.0.0.1:{CDP_PORT}",
-            "--output-dir",
-            str(base / "output"),
-        ],
-        "cwd": str(base / "workspace"),
-        "env": {"PATH": f"{host.node_bin}:/usr/bin:/bin"},
-        "timeout": CONNECT_TIMEOUT_SECONDS,
-    }
-
-
-def login_server_entry(root: Path, host: Host) -> dict[str, Any]:
-    """The ``mcp_servers.browser-login`` entry: chief's venv python running the
-    installed ``browser_host.py``, which launches Chrome and serves the viewer."""
     return {
         "command": [
             str(host.python),
             str(root / "skills" / "playwright" / "scripts" / "browser_host.py"),
         ],
+        "session_context": True,
         "env": {
-            "BROWSER_PROFILE": str(data_dir(root) / "profile"),
+            "PLAYWRIGHT_MCP": str(
+                base / "server" / "node_modules" / ".bin" / "playwright-mcp"
+            ),
+            "BROWSER_PROFILE": str(base / "profile"),
+            "OUTPUT_DIR": str(base / "output"),
+            "WORKSPACE": str(base / "workspace"),
             "CDP_PORT": str(CDP_PORT),
             "VIEWER_PORT": str(VIEWER_PORT),
             "PUBLIC_BASE": host.public_base,
+            "PATH": f"{host.node_bin}:/usr/bin:/bin",
         },
         "timeout": CONNECT_TIMEOUT_SECONDS,
     }
@@ -199,14 +192,14 @@ def _union(current: object, additions: list[str]) -> list[str]:
 
 
 def wire(config: dict[str, Any], root: Path, host: Host) -> dict[str, Any]:
-    """``config`` with both servers, gate lists, and screening wired in (a copy)."""
+    """``config`` with the server, gate lists, and screening wired in (a copy)."""
     out = copy.deepcopy(config)
     servers = out.setdefault("mcp_servers", {})
     servers[MCP_SERVER_NAME] = server_entry(root, host)
-    servers[LOGIN_SERVER_NAME] = login_server_entry(root, host)
+    servers.pop(OLD_LOGIN_SERVER, None)
     gate = out.setdefault("gate", {})
-    approved = _gated(READ_TOOLS) + [LOGIN_LINK_TOOL]
-    gate["approved"] = _union(gate.get("approved"), approved)
+    current = [t for t in gate.get("approved") or [] if t != OLD_LOGIN_LINK_TOOL]
+    gate["approved"] = _union(current, _gated(READ_TOOLS) + [LOGIN_LINK_TOOL])
     gate["never"] = _union(gate.get("never"), _gated(NEVER_TOOLS))
     # Only extend an explicit screen list. Absent means core's default, which
     # already screens mcp_*; writing a list would replace (narrow) it.

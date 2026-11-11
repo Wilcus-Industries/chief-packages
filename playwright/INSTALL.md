@@ -1,13 +1,16 @@
 # Installing playwright
 
-Gives chief a real browser: the [Playwright MCP server](https://github.com/microsoft/playwright-mcp)
-(`@playwright/mcp`, pinned in `scripts/playwright_tools.py`) attached to one
-Google Chrome window (headed, so Google sign-in accepts it; it sits on the
-Mac's screen) on a **persistent chief-only profile**. A second small
-server, **browser-login** (`scripts/browser_host.py`, chief's own venv
-python), owns that Chrome and serves a phone **login viewer**: chief texts the
-owner a one-time link, the owner logs in by hand on their phone, and the
-cookies stay in chief's profile. Depends on `screening`.
+Gives chief a real browser. One server, `playwright` (`scripts/browser_host.py`,
+chief's own venv python), keeps one Google Chrome window (headed, so Google
+sign-in accepts it; it sits on the Mac's screen) on a **persistent chief-only
+profile** — one set of logins shared by every chief session — and gives each
+**session its own tab**: one pinned [Playwright MCP](https://github.com/microsoft/playwright-mcp)
+child (`@playwright/mcp`, pinned in `scripts/playwright_tools.py`) per session,
+idle tabs closed after 10 minutes, at most 4 at once, tab switching refused.
+It needs core's `session_context` MCP option (chief ≥ the release carrying
+it) to tell sessions apart. It also serves a phone **login viewer**: chief
+texts the owner a one-time link, the owner logs in by hand on their phone,
+and the cookies stay in chief's profile. Depends on `screening`.
 
 ## Read before installing — tell the owner, get a yes
 
@@ -43,18 +46,19 @@ phone links — Tailscale with `tailscale serve` already fronting chief's web UI
    - creates `data/playwright/{profile,output,workspace}`;
    - copies the skill and its scripts to `skills/playwright/`;
    - runs `tailscale serve --bg --set-path /browser http://127.0.0.1:8131`;
-   - wires `config.yaml` via `playwright_tools.py wire`: the `browser-login`
-     server (env: profile, ports, public link base), the `playwright` server
-     (`--cdp-endpoint`, `cwd` confined to `data/playwright/workspace`, node's
-     `PATH`), the read tools + `mcp_browser-login_login_link` onto
-     `gate.approved`, `browser_run_code_unsafe` onto `gate.never`, and
+   - wires `config.yaml` via `playwright_tools.py wire`: the `playwright`
+     server (`session_context: true`; env: the pinned binary, profile, output
+     and workspace dirs — children's file access is confined to the
+     workspace — ports, public link base, node's `PATH`), removing the older
+     two-server layout's `browser-login` entry if present; the read tools +
+     `mcp_playwright_login_link` onto `gate.approved`, `browser_run_code_unsafe` onto `gate.never`, and
      `mcp_playwright_*` onto `typesafe.screen_tools` **if** that list is set.
      Lists are unioned, never replaced;
    - records the install (`chief.registry_apply`).
 4. `restart`.
 5. Verify: `uv run python -m chief.pkg.cli verify playwright` is clean;
    `browser_navigate` to `https://example.com` and `browser_snapshot` shows
-   "Example Domain"; `mcp_browser-login_login_link` with
+   "Example Domain"; `mcp_playwright_login_link` with
    `https://example.com` returns a link — text it to the owner and ask them to
    open it and tap Done.
 

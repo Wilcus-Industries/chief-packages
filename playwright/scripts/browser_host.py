@@ -1,139 +1,145 @@
 #!/usr/bin/env python3
-"""browser-login: chief's shared Chrome + the owner's remote login page.
+"""playwright: chief's browser — one shared Chrome, one tab per session.
 
-One process, supervised by chief as a stdio MCP server:
+One process, supervised by chief as the stdio MCP server ``playwright``
+(``session_context: true``, so each call names the calling chief session):
 
-- keeps a Chrome window running on the persistent chief-only profile with CDP
-  on 127.0.0.1 (playwright-mcp attaches to the same browser);
-- exposes one MCP tool, ``login_link(url)``: open ``url`` in a new tab and
-  return a one-time link the owner opens on their phone;
-- serves that link's viewer on 127.0.0.1 (``tailscale serve`` puts it on the
-  tailnet under ``/browser``), bridging the phone to the tab.
+- keeps a Chrome window running on the persistent chief-only profile, CDP on
+  127.0.0.1 — one set of logins for every session;
+- re-exposes the pinned playwright-mcp tools, routing each session's calls to
+  its own Playwright child and tab (``browser_pool``): idle tabs close after
+  10 minutes, at most 4 at once, and switching tabs is refused;
+- adds ``login_link(url)`` and serves its phone viewer on 127.0.0.1
+  (``tailscale serve`` mounts it on the tailnet at ``/browser``).
 
 Config comes from env (wired by ``playwright_tools.py wire``). stdout belongs
-to the MCP protocol, so all logging goes to stderr and uvicorn's access log is
-off.
+to the MCP protocol, so logging goes to stderr and uvicorn's access log is off.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import uvicorn
-from cdp_client import CdpConnection, close_tab, create_tab, page_ws_url
-from cdp_input import LOGIN_TAB_SETUP
+from browser_pool import (
+    BLOCKED,
+    BLOCKED_MESSAGE,
+    END,
+    ENDED_MESSAGE,
+    BrowserPool,
+    route,
+)
 from chrome_launch import ensure_chrome, keep_chrome_alive
-from login_bridge import run_bridge
-from login_sessions import TTL_SECONDS, SessionStore
+from login_host import LOGIN_LINK_DESCRIPTION, LoginHost
 from login_viewer import build_app
-from mcp.server.fastmcp import FastMCP
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from mcp import types
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
+from playwright_child import ChildSpec, PlaywrightChild
 
-logger = logging.getLogger("browser-login")
+logger = logging.getLogger("playwright-host")
 
 PROFILE = Path(os.environ.get("BROWSER_PROFILE", "data/playwright/profile"))
 CDP_PORT = int(os.environ.get("CDP_PORT", "9322"))
 VIEWER_PORT = int(os.environ.get("VIEWER_PORT", "8131"))
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", f"http://127.0.0.1:{VIEWER_PORT}")
-PUBLIC_BASE = PUBLIC_BASE.rstrip("/")
+SPEC = ChildSpec(
+    binary=os.environ.get("PLAYWRIGHT_MCP", "playwright-mcp"),
+    cdp_port=CDP_PORT,
+    output_dir=os.environ.get("OUTPUT_DIR", "data/playwright/output"),
+    workspace=os.environ.get("WORKSPACE", "data/playwright/workspace"),
+    path=os.environ.get("PATH", "/usr/bin:/bin"),
+)
+REAP_EVERY_SECONDS = 60
+UNSCOPED = "_unscoped"  # a call with no chief session (not opted in / CLI)
 
-store = SessionStore()
-mcp = FastMCP("browser-login")
-# token -> the login tab's CDP session, held open for the tab's whole life:
-# LOGIN_TAB_SETUP (the passkey block) only lasts while a session is attached.
-_tabs: dict[str, CdpConnection] = {}
+LOGIN_TOOL = types.Tool(
+    name="login_link",
+    description=LOGIN_LINK_DESCRIPTION,
+    inputSchema={
+        "type": "object",
+        "properties": {"url": {"type": "string", "description": "Login page URL"}},
+        "required": ["url"],
+    },
+)
 
-
-async def _tab_connection(token: str, target_id: str) -> CdpConnection:
-    conn = _tabs.get(token)
-    if conn is None or conn.closed:
-        conn = await CdpConnection.open(await page_ws_url(CDP_PORT, target_id))
-        for method, params in LOGIN_TAB_SETUP:
-            await conn.send(method, params)
-        _tabs[token] = conn
-    return conn
-
-
-async def _finish(token: str, target_id: str) -> None:
-    conn = _tabs.pop(token, None)
-    if conn is not None:
-        await conn.close()
-    await close_tab(CDP_PORT, target_id)
+server: Server[Any, Any] = Server("playwright")
+login = LoginHost(PROFILE, CDP_PORT, PUBLIC_BASE)
 
 
-@mcp.tool()
-async def login_link(url: str) -> str:
-    """Open ``url`` in chief's browser and return a one-time link for the owner.
-
-    The owner opens the link on their phone, sees the live tab, logs in by
-    hand (password, 2FA, captcha), and taps Done; the cookies stay in chief's
-    profile. Text the owner the link. Never ask for their password.
-    """
-    if urlsplit(url).scheme not in ("http", "https"):
-        return "error: url must be http(s)"
+async def _start_child() -> PlaywrightChild:
     await ensure_chrome(PROFILE, CDP_PORT)
-    # Open blank, attach the passkey block, then load the site — so even a
-    # passkey prompt fired on page load never reaches the Mac's native UI.
-    session = store.mint(await create_tab(CDP_PORT, "about:blank"), url)
-    conn = await _tab_connection(session.token, session.target_id)
-    await conn.send("Page.navigate", {"url": url})
-    minutes = TTL_SECONDS // 60
-    return (
-        f"{PUBLIC_BASE}/s/{session.token}\n"
-        f"Single use, expires in {minutes} minutes. The owner taps Done when "
-        "logged in; then the site is ready to browse."
+    return await PlaywrightChild.start(SPEC)
+
+
+pool = BrowserPool(_start_child)
+playwright_tools: list[types.Tool] = []
+
+
+def _text(text: str, error: bool = False) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], isError=error
     )
 
 
-class _Phone:
-    def __init__(self, websocket: WebSocket) -> None:
-        self._ws = websocket
-
-    async def receive(self) -> dict[str, Any] | None:
-        try:
-            message = await self._ws.receive_json()
-        except (WebSocketDisconnect, ValueError, RuntimeError):
-            return None
-        return message if isinstance(message, dict) else {}
-
-    async def send(self, message: dict[str, Any]) -> None:
-        await self._ws.send_json(message)
+def _calling_thread() -> str:
+    meta = server.request_context.meta
+    extra = (meta.model_extra if meta is not None else None) or {}
+    return str(extra.get("chief/thread") or UNSCOPED)
 
 
-async def open_session(token: str, websocket: WebSocket) -> None:
-    session = store.get(token)
-    if session is None:
-        await websocket.close(code=4410)
-        return
-    cdp = await _tab_connection(token, session.target_id)
-    outcome = await run_bridge(cdp, _Phone(websocket))
-    if outcome == "done":
-        store.end(token)
-        await _finish(token, session.target_id)
-        with contextlib.suppress(Exception):
-            await websocket.send_json({"t": "ended"})
-            await websocket.close()
+@server.list_tools()
+async def _list_tools() -> list[types.Tool]:
+    return [*playwright_tools, LOGIN_TOOL]
 
 
-async def _sweep_expired(every: float = 30) -> None:
+@server.call_tool(validate_input=False)
+async def _call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    if name == LOGIN_TOOL.name:
+        text = await login.login_link(str(arguments.get("url", "")))
+        return _text(text, error=text.startswith("error"))
+    thread = _calling_thread()
+    action = route(name, arguments)
+    if action == BLOCKED:
+        return _text(BLOCKED_MESSAGE, error=True)
+    if action == END:
+        await pool.end(thread)
+        return _text(ENDED_MESSAGE)
+    result: types.CallToolResult = await pool.call(thread, name, arguments)
+    return result
+
+
+async def _reap_idle() -> None:
     while True:
-        await asyncio.sleep(every)
-        for session in store.sweep_expired():
-            await _finish(session.token, session.target_id)
+        await asyncio.sleep(REAP_EVERY_SECONDS)
+        for thread in await pool.reap_idle():
+            logger.info("closed idle browser tab for session %s", thread)
+
+
+async def _serve_stdio() -> None:
+    async with stdio_server() as (read, write):
+        await server.run(read, write, server.create_initialization_options())
 
 
 async def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     await ensure_chrome(PROFILE, CDP_PORT)
-    app = build_app(store, open_session, secure_cookie=PUBLIC_BASE.startswith("https"))
-    server = uvicorn.Server(
+    # The tool list comes from the pinned server itself; a probe child that
+    # never opens a tab lends it, then exits.
+    probe = await PlaywrightChild.start(SPEC)
+    try:
+        playwright_tools.extend(await probe.list_tools())
+    finally:
+        await probe.close()
+    app = build_app(
+        login.store, login.open_session, secure_cookie=PUBLIC_BASE.startswith("https")
+    )
+    viewer = uvicorn.Server(
         uvicorn.Config(
             app,
             host="127.0.0.1",
@@ -143,16 +149,19 @@ async def main() -> None:
             lifespan="off",
         )
     )
-    stdio = asyncio.create_task(mcp.run_stdio_async())
+    stdio = asyncio.create_task(_serve_stdio())
     background = [
-        asyncio.create_task(server.serve()),
+        asyncio.create_task(viewer.serve()),
         asyncio.create_task(keep_chrome_alive(PROFILE, CDP_PORT)),
-        asyncio.create_task(_sweep_expired()),
+        asyncio.create_task(login.sweep_expired()),
+        asyncio.create_task(_reap_idle()),
     ]
-    # chief closing our stdin (stop/restart) ends the MCP session; then exit.
-    # Chrome runs in its own session and survives for the next instance.
+    # chief closing our stdin (stop/restart) ends the MCP session; then close
+    # every session's tab and exit. Chrome runs in its own session and
+    # survives (logins intact) for the next instance.
     await asyncio.wait([stdio, background[0]], return_when=asyncio.FIRST_COMPLETED)
-    server.should_exit = True
+    viewer.should_exit = True
+    await pool.close_all()
     for task in [stdio, *background]:
         task.cancel()
     await asyncio.gather(stdio, *background, return_exceptions=True)

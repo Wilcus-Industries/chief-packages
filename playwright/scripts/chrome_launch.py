@@ -3,7 +3,7 @@
 A real (headed) Chrome window on the persistent chief-only profile, CDP on
 localhost only. Not headless: Google sign-in refuses HeadlessChrome, and the
 owner explicitly chose a visible window on the Mac to make Google logins work.
-It runs in its own session so a browser-login server restart (every chief
+It runs in its own session so a browser host restart (every chief
 restart) reattaches to it instead of killing the owner's logged-in browser.
 """
 
