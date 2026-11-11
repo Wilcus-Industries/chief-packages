@@ -79,7 +79,7 @@ exclude = ['^(?!tests/).+\.py$']
 module = [
     "chief", "chief.*", "yaml",
     "gw_aliases", "sender_trust", "gmail_screen", "tool_gate", "oauth_consent",
-    "version_check", "auth_failure",
+    "version_check", "auth_failure", "playwright_tools",
 ]
 ignore_missing_imports = true
 

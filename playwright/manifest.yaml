@@ -1,0 +1,25 @@
+name: playwright
+description: Drive a real Chrome (headless) via the Playwright MCP server, on a persistent chief-only profile that keeps your logins.
+dependencies:
+  - screening
+mcp_servers:
+  playwright:
+    # Informational: install wires the real entry into config.yaml with
+    # absolute paths, the confined cwd, and PATH (scripts/playwright_tools.py
+    # `wire`). The binary is the PINNED server npm-installed under
+    # data/playwright/server — never `npx @latest`.
+    command:
+      - data/playwright/server/node_modules/.bin/playwright-mcp
+      - --browser
+      - chrome
+      - --headless
+      - --user-data-dir
+      - data/playwright/profile
+      - --output-dir
+      - data/playwright/output
+skills:
+  - skills/playwright
+config_keys:
+  - gate.approved
+secrets: []
+python_deps: []
