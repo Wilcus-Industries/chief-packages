@@ -1,11 +1,11 @@
 ---
 name: playwright
-description: Drive a real headless Chrome through the playwright MCP tools (mcp_playwright_browser_*) — JS-heavy pages, sites the owner has logged chief into, forms. When a site needs a login, mint a phone login link with mcp_browser-login_login_link and text it to the owner.
+description: Drive a real Chrome through the playwright MCP tools (mcp_playwright_browser_*) — JS-heavy pages, sites the owner has logged chief into, forms. When a site needs a login, mint a phone login link with mcp_browser-login_login_link and text it to the owner.
 ---
 
 # playwright — a real browser, logged in as the owner
 
-The `mcp_playwright_browser_*` tools drive one headless Google Chrome on a
+The `mcp_playwright_browser_*` tools drive one Google Chrome window (on the Mac's screen; nobody watches it) on a
 **persistent, chief-only profile** (`data/playwright/profile`). The
 browser-login server keeps that Chrome running; cookies survive restarts, so a
 site the owner logged into stays logged in until the site expires the session.

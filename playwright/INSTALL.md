@@ -2,7 +2,8 @@
 
 Gives chief a real browser: the [Playwright MCP server](https://github.com/microsoft/playwright-mcp)
 (`@playwright/mcp`, pinned in `scripts/playwright_tools.py`) attached to one
-headless Google Chrome on a **persistent chief-only profile**. A second small
+Google Chrome window (headed, so Google sign-in accepts it; it sits on the
+Mac's screen) on a **persistent chief-only profile**. A second small
 server, **browser-login** (`scripts/browser_host.py`, chief's own venv
 python), owns that Chrome and serves a phone **login viewer**: chief texts the
 owner a one-time link, the owner logs in by hand on their phone, and the

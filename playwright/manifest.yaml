@@ -1,5 +1,5 @@
 name: playwright
-description: Drive a real headless Chrome via the Playwright MCP server, on a persistent chief-only profile the owner logs into from their phone.
+description: Drive a real Chrome via the Playwright MCP server, on a persistent chief-only profile the owner logs into from their phone.
 dependencies:
   - screening
 mcp_servers:

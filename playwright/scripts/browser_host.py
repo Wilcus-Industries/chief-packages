@@ -3,7 +3,7 @@
 
 One process, supervised by chief as a stdio MCP server:
 
-- keeps headless Chrome running on the persistent chief-only profile with CDP
+- keeps a Chrome window running on the persistent chief-only profile with CDP
   on 127.0.0.1 (playwright-mcp attaches to the same browser);
 - exposes one MCP tool, ``login_link(url)``: open ``url`` in a new tab and
   return a one-time link the owner opens on their phone;

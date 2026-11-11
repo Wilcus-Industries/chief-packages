@@ -1,6 +1,8 @@
 """Launch and keep alive the one Chrome chief and the owner's phone share.
 
-Headless Chrome on the persistent chief-only profile, CDP on localhost only.
+A real (headed) Chrome window on the persistent chief-only profile, CDP on
+localhost only. Not headless: Google sign-in refuses HeadlessChrome, and the
+owner explicitly chose a visible window on the Mac to make Google logins work.
 It runs in its own session so a browser-login server restart (every chief
 restart) reattaches to it instead of killing the owner's logged-in browser.
 """
@@ -32,7 +34,11 @@ def chrome_binary() -> str:
 
 def chrome_args(profile: Path, port: int) -> list[str]:
     return [
-        "--headless=new",
+        # The window sits unwatched on the Mac: keep rendering when it is
+        # hidden or covered, or the phone's screencast freezes.
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
         f"--remote-debugging-port={port}",
         "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={profile}",

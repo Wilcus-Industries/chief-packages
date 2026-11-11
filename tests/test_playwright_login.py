@@ -128,7 +128,16 @@ def test_chrome_args_bind_localhost_and_avoid_keychain_prompts() -> None:
     assert "--user-data-dir=/p/profile" in args
     # Real keychain access from a daemon can raise a GUI prompt nobody answers.
     assert "--use-mock-keychain" in args
-    assert any(a.startswith("--headless") for a in args)
+    # A real window, not headless: Google sign-in refuses HeadlessChrome. The
+    # window sits unwatched on the Mac, so rendering must not be throttled
+    # when it is hidden or covered, or the phone's stream freezes.
+    assert not any(a.startswith("--headless") for a in args)
+    for flag in (
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+    ):
+        assert flag in args
 
 
 # --- bridge: phone <-> tab -------------------------------------------------
