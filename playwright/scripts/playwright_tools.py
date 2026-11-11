@@ -6,11 +6,12 @@ classified once, here. chief core registers a discovered MCP tool as
 ``mcp_<server>_<tool>`` (``chief.mcpclient.manager``), so with server name
 ``playwright`` the gate sees e.g. ``mcp_playwright_browser_click``.
 
-- **read** — looking: navigate, snapshot, screenshot, console/network logs,
-  tab and viewport housekeeping. Registered on ``gate.approved`` so they run
-  without a card.
+- **read** — looking: navigate, snapshot, screenshot, console logs, the
+  network request list, tab and viewport housekeeping. Registered on
+  ``gate.approved`` so they run without a card.
 - **write** — acting *as the owner* in a browser that may be logged in:
-  clicking, typing, submitting, uploading local files, running page JS. Left
+  clicking, typing, submitting, uploading local files, running page JS, and
+  reading one network request in full (its headers carry credentials). Left
   OFF ``gate.approved`` so each one raises the approval card (the owner can
   answer "always" per tool).
 - **never** — ``browser_run_code_unsafe`` runs arbitrary code inside the
@@ -19,8 +20,9 @@ classified once, here. chief core registers a discovered MCP tool as
 
 Denial stays allowlist-shaped: a tool a future release adds that nobody
 classified is on neither list, so it cards. ``PINNED_TOOLS`` is the pinned
-release's exact tool list; the tests fail if a ``PIN`` bump is not
-reclassified.
+release's exact tool list, recorded for ``PINNED_TOOLS_VERSION``; the tests
+fail while that differs from ``PIN``, so a bump forces re-recording the list
+(and ``ALL_TOOLS == PINNED_TOOLS`` then forces classifying anything new).
 
 Navigation is a read on purpose (the owner asked that browsing stay free), but
 note it is not side-effect free: a GET can carry data out in its query string,
@@ -78,7 +80,6 @@ READ_TOOLS: frozenset[str] = frozenset(
         "browser_wait_for",
         "browser_console_messages",
         "browser_network_requests",
-        "browser_network_request",
         "browser_tabs",
         "browser_resize",
         "browser_emulate_media",
@@ -99,6 +100,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "browser_handle_dialog",
         "browser_file_upload",
         "browser_evaluate",
+        # One request's full headers and body: Authorization, cookies, tokens.
+        # The URL list (browser_network_requests) stays a read.
+        "browser_network_request",
     }
 )
 
@@ -106,7 +110,9 @@ NEVER_TOOLS: frozenset[str] = frozenset({"browser_run_code_unsafe"})
 
 ALL_TOOLS: frozenset[str] = READ_TOOLS | WRITE_TOOLS | NEVER_TOOLS
 
-# `tools/list` of @playwright/mcp@PIN (default caps), recorded at pin time.
+# `tools/list` of @playwright/mcp@PINNED_TOOLS_VERSION (default caps). Bump
+# this only after re-recording the list from that release.
+PINNED_TOOLS_VERSION = "0.0.85"
 PINNED_TOOLS: frozenset[str] = frozenset(
     {
         "browser_click",
@@ -194,10 +200,11 @@ def _union(current: object, additions: list[str]) -> list[str]:
 def wire(config: dict[str, Any], root: Path, host: Host) -> dict[str, Any]:
     """``config`` with the server, gate lists, and screening wired in (a copy)."""
     out = copy.deepcopy(config)
-    servers = out.setdefault("mcp_servers", {})
+    # `or {}`, not setdefault: a bare `mcp_servers:` / `gate:` key is None.
+    servers = out["mcp_servers"] = out.get("mcp_servers") or {}
     servers[MCP_SERVER_NAME] = server_entry(root, host)
     servers.pop(OLD_LOGIN_SERVER, None)
-    gate = out.setdefault("gate", {})
+    gate = out["gate"] = out.get("gate") or {}
     current = [t for t in gate.get("approved") or [] if t != OLD_LOGIN_LINK_TOOL]
     gate["approved"] = _union(current, _gated(READ_TOOLS) + [LOGIN_LINK_TOOL])
     gate["never"] = _union(gate.get("never"), _gated(NEVER_TOOLS))

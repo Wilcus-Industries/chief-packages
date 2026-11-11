@@ -83,7 +83,7 @@ module = [
     "gw_aliases", "sender_trust", "gmail_screen", "tool_gate", "oauth_consent",
     "version_check", "auth_failure", "playwright_tools", "cdp_input", "cdp_client",
     "chrome_launch", "login_bridge", "login_sessions", "login_viewer", "browser_host",
-    "browser_pool", "playwright_child", "login_host",
+    "browser_pool", "playwright_child", "login_host", "url_policy",
 ]
 ignore_missing_imports = true
 

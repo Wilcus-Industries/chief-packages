@@ -15,6 +15,8 @@ import logging
 import shutil
 import subprocess
 import sys
+import weakref
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -103,30 +105,61 @@ async def cdp_up(port: int) -> bool:
         return False
 
 
-async def ensure_chrome(profile: Path, port: int, wait: float = 20) -> None:
-    """Start Chrome unless one already answers on ``port``."""
-    if await cdp_up(port):
-        return
-    apply_profile_prefs(profile)
+def _popen(args: list[str]) -> None:
     subprocess.Popen(
-        [chrome_binary(), *chrome_args(profile, port)],
+        args,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    deadline = asyncio.get_running_loop().time() + wait
-    while asyncio.get_running_loop().time() < deadline:
+
+
+# Every caller (the keep-alive loop, a session's first call, login_link) goes
+# through here; one at a time, so only one Chrome launch and one Preferences
+# write ever happen together. (Per event loop: an asyncio.Lock binds to one.)
+_launch_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _launch_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _launch_locks.get(loop)
+    if lock is None:
+        lock = _launch_locks[loop] = asyncio.Lock()
+    return lock
+
+
+async def ensure_chrome(
+    profile: Path,
+    port: int,
+    wait: float = 20,
+    launch: Callable[[list[str]], None] = _popen,
+) -> bool:
+    """Start Chrome unless one already answers on ``port``. True if this call
+    (re)launched it — every tab that existed before is gone."""
+    async with _launch_lock():
         if await cdp_up(port):
-            return
-        await asyncio.sleep(0.25)
-    raise RuntimeError(f"Chrome did not open CDP on 127.0.0.1:{port}")
+            return False
+        apply_profile_prefs(profile)
+        launch([chrome_binary(), *chrome_args(profile, port)])
+        deadline = asyncio.get_running_loop().time() + wait
+        while asyncio.get_running_loop().time() < deadline:
+            if await cdp_up(port):
+                return True
+            await asyncio.sleep(0.25)
+        raise RuntimeError(f"Chrome did not open CDP on 127.0.0.1:{port}")
 
 
-async def keep_chrome_alive(profile: Path, port: int, every: float = 5) -> None:
+async def keep_chrome_alive(
+    ensure: Callable[[], Awaitable[object]], every: float = 5
+) -> None:
+    """Call ``ensure`` every ``every`` seconds forever; a failed round is
+    logged and retried, never fatal."""
     while True:
         try:
-            await ensure_chrome(profile, port)
-        except RuntimeError:
+            await ensure()
+        except Exception:
             logger.exception("chrome relaunch failed")
         await asyncio.sleep(every)

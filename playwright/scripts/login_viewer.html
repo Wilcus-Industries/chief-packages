@@ -17,11 +17,14 @@
                 background: #30363d; color: var(--fg); }
   #bar #done { background: var(--accent); }
   #kb { position: absolute; opacity: 0; left: 0; bottom: 0; width: 1px; height: 1px; border: 0; }
+  #origin { padding: 6px 10px; background: var(--bar); color: var(--fg); font-size: 13px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
   #msg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
          padding: 24px; text-align: center; color: var(--fg); background: rgba(0,0,0,.85); }
 </style>
 </head>
 <body>
+<div id="origin" aria-label="site">&nbsp;</div>
 <div id="view"><img id="screen" alt="chief's browser"><div id="msg"></div></div>
 <input id="kb" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
 <div id="bar">
@@ -43,6 +46,7 @@
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.t === "frame") { img.src = "data:image/jpeg;base64," + m.data; meta = m.meta || meta; }
+    if (m.t === "origin") $("origin").textContent = m.host || "(no site)";
     if (m.t === "ended") show("Saved. chief stays logged in — you can close this tab.");
   };
   ws.onclose = () => { if (msg.style.display !== "flex") show("Disconnected. Reload to reconnect."); };

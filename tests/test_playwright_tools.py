@@ -23,6 +23,7 @@ from playwright_tools import (
     NEVER_TOOLS,
     PIN,
     PINNED_TOOLS,
+    PINNED_TOOLS_VERSION,
     READ_TOOLS,
     SCREEN_PATTERN,
     WRITE_TOOLS,
@@ -48,14 +49,24 @@ def test_split_is_disjoint_and_covers_exactly_the_pinned_release() -> None:
     assert READ_TOOLS.isdisjoint(WRITE_TOOLS)
     assert READ_TOOLS.isdisjoint(NEVER_TOOLS)
     assert WRITE_TOOLS.isdisjoint(NEVER_TOOLS)
-    # Bumping PIN without reclassifying the new release's tools fails here.
+    # Every recorded tool of the pinned release is classified, and nothing else.
     assert ALL_TOOLS == PINNED_TOOLS
+
+
+def test_the_recorded_tool_list_is_for_the_pinned_release() -> None:
+    # Bumping PIN alone fails here: re-record PINNED_TOOLS from the new
+    # release's tools/list, then bump PINNED_TOOLS_VERSION to match.
+    assert PIN == PINNED_TOOLS_VERSION
 
 
 def test_actions_card_and_host_code_execution_is_refused() -> None:
     assert {"browser_click", "browser_type", "browser_fill_form"} <= WRITE_TOOLS
     # file_upload sends local bytes to a site; evaluate runs page JS.
     assert {"browser_file_upload", "browser_evaluate"} <= WRITE_TOOLS
+    # One request in full returns its Authorization header and body; the URL
+    # list does not.
+    assert "browser_network_request" in WRITE_TOOLS
+    assert "browser_network_requests" in READ_TOOLS
     # run_code_unsafe runs arbitrary code in the server's node process.
     assert NEVER_TOOLS == {"browser_run_code_unsafe"}
 
@@ -146,6 +157,14 @@ def test_wire_unions_into_existing_lists_and_is_idempotent() -> None:
     assert len(once["gate"]["approved"]) == len(set(once["gate"]["approved"]))
     # The input is not mutated.
     assert existing["gate"]["approved"] == ["notify_owner"]
+
+
+def test_wire_tolerates_empty_top_level_keys() -> None:
+    # `mcp_servers:` / `gate:` with nothing under them load as None.
+    wired = wire({"mcp_servers": None, "gate": None}, Path("/r"), HOST)
+    assert set(wired["mcp_servers"]) == {"playwright"}
+    assert gated_name("browser_navigate") in wired["gate"]["approved"]
+    assert wired["gate"]["never"] == [gated_name("browser_run_code_unsafe")]
 
 
 def test_wire_leaves_default_screen_tools_alone() -> None:

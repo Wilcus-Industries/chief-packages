@@ -1,7 +1,8 @@
 """A minimal Chrome DevTools Protocol client over a websocket.
 
-Just enough for the login viewer: request/response by id, an event queue, and
-the browser-level calls to open and close a tab. CDP listens on 127.0.0.1.
+Just enough for the login viewer and the host's tab bookkeeping:
+request/response by id, an event queue, and the browser-level calls to list,
+open and close tabs. CDP listens on 127.0.0.1.
 """
 
 from __future__ import annotations
@@ -106,3 +107,27 @@ async def page_ws_url(port: int, target_id: str) -> str:
         if target.get("id") == target_id:
             return str(target["webSocketDebuggerUrl"])
     raise CdpError(f"tab {target_id} is gone")
+
+
+async def page_ids(port: int) -> set[str]:
+    """The target ids of every open tab (page target) in the browser."""
+    return {
+        str(t["id"]) for t in await _json(port, "/json/list") if t.get("type") == "page"
+    }
+
+
+async def reconcile_tabs(port: int) -> int:
+    """Close every tab but one blank one; return how many were closed.
+
+    Run at browser-host startup: a previous host's session and login tabs are
+    nobody's now (sessions and links live in memory), and would otherwise sit
+    in the logged-in browser forever. One blank tab stays so the window — and
+    Chrome with it — stays up.
+    """
+    pages = [t for t in await _json(port, "/json/list") if t.get("type") == "page"]
+    keep = next((t for t in pages if t.get("url") == "about:blank"), None)
+    keep_id = str(keep["id"]) if keep else await create_tab(port, "about:blank")
+    stale = [str(t["id"]) for t in pages if str(t["id"]) != keep_id]
+    for target_id in stale:
+        await close_tab(port, target_id)
+    return len(stale)

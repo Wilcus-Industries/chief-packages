@@ -304,3 +304,98 @@ def test_profile_prefs_create_a_fresh_profile(tmp_path: Path) -> None:
     apply_profile_prefs(tmp_path / "new")
     data = json.loads((tmp_path / "new" / "Default" / "Preferences").read_text())
     assert data["signin"]["allowed"] is False
+
+
+# --- the phone sees which site it is on --------------------------------------
+
+
+def test_bridge_tells_the_phone_the_top_frame_host_only() -> None:
+    class TreeCdp(FakeCdp):
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> Any:
+            await super().send(method, params)
+            if method == "Page.getFrameTree":
+                return {"frameTree": {"frame": {"url": "https://start.test/a"}}}
+            return {}
+
+    async def scenario() -> FakePhone:
+        cdp = TreeCdp()
+        phone = FakePhone([{"t": "hello", "w": 390, "h": 844, "dpr": 3}])
+        task = asyncio.create_task(run_bridge(cdp, phone))
+        await asyncio.sleep(0.02)
+        await cdp.events.put(
+            {
+                "method": "Page.frameNavigated",
+                "params": {
+                    "frame": {"id": "f2", "parentId": "f1", "url": "https://ads.test/"}
+                },
+            }
+        )
+        await cdp.events.put(
+            {
+                "method": "Page.frameNavigated",
+                "params": {
+                    "frame": {"id": "f1", "url": "https://accounts.google.com/x?y"}
+                },
+            }
+        )
+        await asyncio.sleep(0.05)
+        await phone.inbound.put({"t": "done"})
+        await asyncio.wait_for(task, 2)
+        return phone
+
+    origins = [m for m in asyncio.run(scenario()).outbound if m["t"] == "origin"]
+    # The page already open when the phone connects, then each top-level
+    # navigation; an iframe navigating never spoofs the bar.
+    assert origins == [
+        {"t": "origin", "host": "start.test"},
+        {"t": "origin", "host": "accounts.google.com"},
+    ]
+
+
+def test_viewer_renders_the_origin_as_text_never_html() -> None:
+    page = (
+        Path(__file__).resolve().parents[1]
+        / "playwright"
+        / "scripts"
+        / "login_viewer.html"
+    ).read_text()
+    assert '$("origin").textContent = m.host' in page
+    assert "innerHTML" not in page
+
+
+def test_head_does_not_spend_the_link() -> None:
+    store = SessionStore(clock=Clock())
+    session = store.mint("T1", "u")
+    client = _client(store, [])
+    probe = client.head(f"/s/{session.token}")
+    assert probe.status_code == 200
+    assert "set-cookie" not in probe.headers
+    # A link preview's HEAD left the link for the owner's real page load.
+    assert client.get(f"/s/{session.token}").status_code == 200
+
+
+# --- a hung child call cannot hold a session forever -------------------------
+
+
+def test_child_calls_carry_a_read_timeout() -> None:
+    from datetime import timedelta
+
+    from playwright_child import CALL_TIMEOUT, PlaywrightChild
+
+    seen: dict[str, Any] = {}
+
+    class Session:
+        async def call_tool(self, name: str, args: dict[str, Any], **kw: Any) -> str:
+            seen.update(kw, name=name)
+            return "ok"
+
+    async def scenario() -> str:
+        task = asyncio.create_task(asyncio.sleep(0))
+        child = PlaywrightChild(Session(), asyncio.Event(), task)
+        result: str = await child.call("browser_snapshot", {})
+        await task
+        return result
+
+    assert asyncio.run(scenario()) == "ok"
+    assert seen["read_timeout_seconds"] == CALL_TIMEOUT
+    assert timedelta(0) < CALL_TIMEOUT <= timedelta(minutes=5)

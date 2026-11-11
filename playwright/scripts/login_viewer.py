@@ -37,6 +37,10 @@ def build_app(
     store: SessionStore, open_session: OpenSession, secure_cookie: bool = False
 ) -> Starlette:
     async def page(request: Request) -> Response:
+        if request.method == "HEAD":
+            # Link previews and prefetchers probe with HEAD: answer without
+            # claiming, so only a real page load (GET) spends the link.
+            return Response(headers=NO_STORE)
         token = request.path_params["token"]
         name = cookie_name(token)
         if store.check(token, request.cookies.get(name)) is not None:

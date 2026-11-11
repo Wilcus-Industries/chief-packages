@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 START_TIMEOUT_SECONDS = 60
 CLOSE_TIMEOUT_SECONDS = 10
+# A call that outlives this raises instead of holding its session's lock (and
+# so idle reaping and browser_close) forever. The pinned server's own waits
+# cap at 30s (browser_wait_for), its navigation timeouts at 60s.
+CALL_TIMEOUT = timedelta(seconds=120)
 
 
 @dataclass(frozen=True)
@@ -88,7 +93,9 @@ class PlaywrightChild:
         return cls(session, stop, task)
 
     async def call(self, name: str, args: dict[str, Any]) -> CallToolResult:
-        return await self._session.call_tool(name, args)
+        return await self._session.call_tool(
+            name, args, read_timeout_seconds=CALL_TIMEOUT
+        )
 
     async def list_tools(self) -> list[Tool]:
         return (await self._session.list_tools()).tools

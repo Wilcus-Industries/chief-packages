@@ -2,7 +2,9 @@
 
 Frames flow tab -> phone (CDP screencast); gestures flow phone -> tab, but only
 through ``cdp_input``'s fixed vocabulary. The tab is emulated at the phone's
-size for the session and restored afterwards.
+size for the session and restored afterwards. The phone also gets the main
+frame's host on every top-level navigation, so the owner can see which site
+they are typing a password into.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from cdp_input import RESET_VIEWPORT, input_commands, viewport_commands
 
@@ -28,9 +31,19 @@ class Phone(Protocol):
     async def send(self, message: dict[str, Any]) -> None: ...
 
 
+def _origin(url: object) -> dict[str, Any]:
+    host = urlsplit(url).hostname if isinstance(url, str) else None
+    return {"t": "origin", "host": host or ""}
+
+
 async def _pump_frames(cdp: Cdp, phone: Phone) -> None:
     while True:
         event = await cdp.next_event()
+        if event.get("method") == "Page.frameNavigated":
+            frame = event.get("params", {}).get("frame", {})
+            if isinstance(frame, dict) and "parentId" not in frame:  # top only
+                await phone.send(_origin(frame.get("url")))
+            continue
         if event.get("method") != "Page.screencastFrame":
             continue
         params = event.get("params", {})
@@ -69,6 +82,9 @@ async def run_bridge(cdp: Cdp, phone: Phone) -> str:
         for method, params in viewport:
             await cdp.send(method, params)
         await cdp.send("Page.enable")
+        tree = await cdp.send("Page.getFrameTree")
+        frame = (tree or {}).get("frameTree", {}).get("frame", {})
+        await phone.send(_origin(frame.get("url")))
         scale = metrics["deviceScaleFactor"]
         await cdp.send(
             "Page.startScreencast",
