@@ -1,0 +1,22 @@
+name: playwright
+description: Drive a real Chrome via the Playwright MCP server — one tab per chief session on a shared, persistent profile you log into from your phone.
+dependencies:
+  - screening
+mcp_servers:
+  # Informational: install wires the real entry into config.yaml with absolute
+  # paths, env, and session_context: true (scripts/playwright_tools.py `wire`).
+  playwright:
+    # The browser host: keeps one Chrome (CDP on 127.0.0.1:9322) on the
+    # persistent profile, runs one PINNED playwright-mcp child (npm-installed
+    # under data/playwright/server) per chief session, and serves the phone
+    # login viewer on 127.0.0.1:8131 (tailnet: /browser via tailscale serve).
+    command:
+      - .venv/bin/python
+      - skills/playwright/scripts/browser_host.py
+skills:
+  - skills/playwright
+config_keys:
+  - gate.approved
+secrets: []
+python_deps:
+  - websockets

@@ -129,6 +129,7 @@ def pytest_configure(config: pytest.Config) -> None:
     global CORE_AVAILABLE
     CORE_AVAILABLE = _ensure_core_on_path()
     _package_scripts_on_path("google-workspace")
+    _package_scripts_on_path("playwright")
 
 
 @pytest.fixture

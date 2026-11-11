@@ -37,6 +37,8 @@ dev = [
     # loads; the expiry-format regression test round-trips through that real
     # loader (core's venv carries google-auth transitively).
     "google-auth>=2",
+    # playwright's browser-login server (cdp_client) talks CDP over websockets.
+    "websockets>=13",
 ]
 
 [tool.uv]
@@ -79,7 +81,9 @@ exclude = ['^(?!tests/).+\.py$']
 module = [
     "chief", "chief.*", "yaml",
     "gw_aliases", "sender_trust", "gmail_screen", "tool_gate", "oauth_consent",
-    "version_check", "auth_failure",
+    "version_check", "auth_failure", "playwright_tools", "cdp_input", "cdp_client",
+    "chrome_launch", "login_bridge", "login_sessions", "login_viewer", "browser_host",
+    "browser_pool", "playwright_child", "login_host", "url_policy",
 ]
 ignore_missing_imports = true
 
