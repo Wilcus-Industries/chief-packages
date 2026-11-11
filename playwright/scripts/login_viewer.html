@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<title>chief browser</title>
+<style>
+  :root { color-scheme: light dark; --bar: #1f2328; --fg: #f6f8fa; --accent: #2f81f7; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; flex-direction: column; font: 15px system-ui, sans-serif; }
+  #view { flex: 1; position: relative; overflow: hidden; touch-action: none; }
+  #screen { width: 100%; display: block; user-select: none; -webkit-user-select: none; }
+  #bar { display: flex; gap: 6px; padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+         background: var(--bar); }
+  #bar button { flex: 1; padding: 10px 0; border: 0; border-radius: 8px; font: inherit;
+                background: #30363d; color: var(--fg); }
+  #bar #done { background: var(--accent); }
+  #kb { position: absolute; opacity: 0; left: 0; bottom: 0; width: 1px; height: 1px; border: 0; }
+  #msg { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+         padding: 24px; text-align: center; color: var(--fg); background: rgba(0,0,0,.85); }
+</style>
+</head>
+<body>
+<div id="view"><img id="screen" alt="chief's browser"><div id="msg"></div></div>
+<input id="kb" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+<div id="bar">
+  <button id="back">Back</button><button id="reload">Reload</button>
+  <button id="type">Keyboard</button><button id="done">Done</button>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const img = $("screen"), kb = $("kb"), msg = $("msg");
+  const base = location.href.split("#")[0].split("?")[0];
+  const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws");
+  let meta = { deviceWidth: innerWidth, deviceHeight: innerHeight };
+  const send = (m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
+  const show = (text) => { msg.textContent = text; msg.style.display = "flex"; };
+
+  ws.onopen = () => send({ t: "hello", w: innerWidth,
+    h: innerHeight - $("bar").offsetHeight, dpr: devicePixelRatio || 2 });
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t === "frame") { img.src = "data:image/jpeg;base64," + m.data; meta = m.meta || meta; }
+    if (m.t === "ended") show("Saved. chief stays logged in — you can close this tab.");
+  };
+  ws.onclose = () => { if (msg.style.display !== "flex") show("Disconnected. Reload to reconnect."); };
+
+  const point = (e) => {
+    const r = img.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * meta.deviceWidth,
+             y: (e.clientY - r.top) / r.height * meta.deviceHeight, r };
+  };
+  let start = null, last = null, moved = false;
+  img.addEventListener("pointerdown", (e) => { start = last = e; moved = false; e.preventDefault(); });
+  img.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    if (Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > 10) moved = true;
+    if (moved) {
+      const p = point(e);
+      send({ t: "scroll", x: p.x, y: p.y, dy: (last.clientY - e.clientY) * meta.deviceHeight / p.r.height });
+      last = e;
+    }
+  });
+  img.addEventListener("pointerup", (e) => {
+    if (start && !moved) { const p = point(e); send({ t: "click", x: p.x, y: p.y }); }
+    start = null;
+  });
+
+  kb.addEventListener("beforeinput", (e) => {
+    if ((e.inputType === "insertText" || e.inputType === "insertReplacementText") && e.data)
+      send({ t: "text", s: e.data });
+    else if (e.inputType === "deleteContentBackward") send({ t: "key", key: "Backspace" });
+    else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph")
+      send({ t: "key", key: "Enter" });
+    e.preventDefault();
+  });
+  const KEYS = ["Enter", "Tab", "Escape", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"];
+  kb.addEventListener("keydown", (e) => {
+    if (KEYS.includes(e.key)) { send({ t: "key", key: e.key }); e.preventDefault(); }
+  });
+
+  $("type").onclick = () => kb.focus();
+  $("back").onclick = () => send({ t: "back" });
+  $("reload").onclick = () => send({ t: "reload" });
+  $("done").onclick = () => send({ t: "done" });
+})();
+</script>
+</body>
+</html>

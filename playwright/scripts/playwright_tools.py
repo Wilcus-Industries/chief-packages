@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import copy
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,24 @@ MCP_SERVER_NAME = "playwright"
 PIN = "0.0.85"
 SCREEN_PATTERN = f"mcp_{MCP_SERVER_NAME}_*"
 CONNECT_TIMEOUT_SECONDS = 60
+# The browser-login server (scripts/browser_host.py) owns the one Chrome both
+# chief and the owner's phone use; playwright-mcp attaches to it over CDP.
+LOGIN_SERVER_NAME = "browser-login"
+LOGIN_LINK_TOOL = f"mcp_{LOGIN_SERVER_NAME}_login_link"
+CDP_PORT = 9322
+VIEWER_PORT = 8131
+
+
+@dataclass(frozen=True)
+class Host:
+    """Machine facts install resolves once: node's dir (the server is a node
+    script), chief's venv python (runs browser_host.py), and the public base
+    URL login links are minted under (the tailnet ``/browser`` mount)."""
+
+    node_bin: Path
+    python: Path
+    public_base: str
+
 
 READ_TOOLS: frozenset[str] = frozenset(
     {
@@ -130,11 +149,12 @@ def data_dir(root: Path) -> Path:
     return root / "data" / MCP_SERVER_NAME
 
 
-def server_entry(root: Path, node_bin: Path) -> dict[str, Any]:
+def server_entry(root: Path, host: Host) -> dict[str, Any]:
     """The ``mcp_servers.playwright`` entry, with absolute paths under ``root``.
 
-    Real Chrome (``--browser chrome``) on a persistent, chief-only profile, so
-    logins made with ``login.sh`` survive restarts. ``cwd`` is a dedicated
+    Attaches over CDP to the Chrome the browser-login server keeps running on
+    the persistent chief-only profile, so logins the owner makes from their
+    phone are the same cookies chief browses with. ``cwd`` is a dedicated
     workspace dir: the server confines file access (explicitly named
     screenshots, uploads) to its cwd, which must not be the chief repo.
     ``PATH`` leads with node's dir because the server binary is a node script.
@@ -143,16 +163,31 @@ def server_entry(root: Path, node_bin: Path) -> dict[str, Any]:
     return {
         "command": [
             str(base / "server" / "node_modules" / ".bin" / "playwright-mcp"),
-            "--browser",
-            "chrome",
-            "--headless",
-            "--user-data-dir",
-            str(base / "profile"),
+            "--cdp-endpoint",
+            f"http://127.0.0.1:{CDP_PORT}",
             "--output-dir",
             str(base / "output"),
         ],
         "cwd": str(base / "workspace"),
-        "env": {"PATH": f"{node_bin}:/usr/bin:/bin"},
+        "env": {"PATH": f"{host.node_bin}:/usr/bin:/bin"},
+        "timeout": CONNECT_TIMEOUT_SECONDS,
+    }
+
+
+def login_server_entry(root: Path, host: Host) -> dict[str, Any]:
+    """The ``mcp_servers.browser-login`` entry: chief's venv python running the
+    installed ``browser_host.py``, which launches Chrome and serves the viewer."""
+    return {
+        "command": [
+            str(host.python),
+            str(root / "skills" / "playwright" / "scripts" / "browser_host.py"),
+        ],
+        "env": {
+            "BROWSER_PROFILE": str(data_dir(root) / "profile"),
+            "CDP_PORT": str(CDP_PORT),
+            "VIEWER_PORT": str(VIEWER_PORT),
+            "PUBLIC_BASE": host.public_base,
+        },
         "timeout": CONNECT_TIMEOUT_SECONDS,
     }
 
@@ -163,12 +198,15 @@ def _union(current: object, additions: list[str]) -> list[str]:
     return merged
 
 
-def wire(config: dict[str, Any], root: Path, node_bin: Path) -> dict[str, Any]:
-    """``config`` with the server, gate lists, and screening wired in (a copy)."""
+def wire(config: dict[str, Any], root: Path, host: Host) -> dict[str, Any]:
+    """``config`` with both servers, gate lists, and screening wired in (a copy)."""
     out = copy.deepcopy(config)
-    out.setdefault("mcp_servers", {})[MCP_SERVER_NAME] = server_entry(root, node_bin)
+    servers = out.setdefault("mcp_servers", {})
+    servers[MCP_SERVER_NAME] = server_entry(root, host)
+    servers[LOGIN_SERVER_NAME] = login_server_entry(root, host)
     gate = out.setdefault("gate", {})
-    gate["approved"] = _union(gate.get("approved"), _gated(READ_TOOLS))
+    approved = _gated(READ_TOOLS) + [LOGIN_LINK_TOOL]
+    gate["approved"] = _union(gate.get("approved"), approved)
     gate["never"] = _union(gate.get("never"), _gated(NEVER_TOOLS))
     # Only extend an explicit screen list. Absent means core's default, which
     # already screens mcp_*; writing a list would replace (narrow) it.
@@ -179,20 +217,24 @@ def wire(config: dict[str, Any], root: Path, node_bin: Path) -> dict[str, Any]:
 
 
 _USAGE = (
-    "usage: playwright_tools.py {reads|writes|never|pin|wire ROOT NODE_BIN}\n"
+    "usage: playwright_tools.py\n"
+    "  {reads|writes|never|pin|viewer-port|wire ROOT NODE_BIN BASE}\n"
     "  reads|writes|never  gated tool names in that class\n"
     "  pin                 the pinned @playwright/mcp version\n"
-    "  wire ROOT NODE_BIN  merge the server + gate + screening into ROOT/config.yaml"
+    "  wire ROOT NODE_BIN BASE  merge servers + gate + screening into\n"
+    "                      ROOT/config.yaml (BASE: public login-link base URL;\n"
+    "                      python is the interpreter running this)"
 )
 
 
 def main(argv: list[str]) -> int:
-    if argv[:1] == ["wire"] and len(argv) == 3:
+    if argv[:1] == ["wire"] and len(argv) == 4:
         import yaml
 
         path = Path(argv[1]) / "config.yaml"
         raw = yaml.safe_load(path.read_text()) if path.exists() else None
-        wired = wire(raw or {}, Path(argv[1]).resolve(), Path(argv[2]))
+        host = Host(Path(argv[2]), Path(sys.executable), argv[3])
+        wired = wire(raw or {}, Path(argv[1]).resolve(), host)
         path.write_text(yaml.safe_dump(wired, sort_keys=False))
         return 0
     listings = {
@@ -200,6 +242,7 @@ def main(argv: list[str]) -> int:
         "writes": _gated(WRITE_TOOLS),
         "never": _gated(NEVER_TOOLS),
         "pin": [PIN],
+        "viewer-port": [str(VIEWER_PORT)],
     }
     if len(argv) == 1 and argv[0] in listings:
         print("\n".join(listings[argv[0]]))

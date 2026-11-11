@@ -1,20 +1,24 @@
 name: playwright
-description: Drive a real Chrome (headless) via the Playwright MCP server, on a persistent chief-only profile that keeps your logins.
+description: Drive a real headless Chrome via the Playwright MCP server, on a persistent chief-only profile the owner logs into from their phone.
 dependencies:
   - screening
 mcp_servers:
+  # Informational: install wires the real entries into config.yaml with
+  # absolute paths, env, the confined cwd, and PATH (scripts/playwright_tools.py
+  # `wire`).
+  browser-login:
+    # Owns the one shared Chrome (CDP on 127.0.0.1:9322) and serves the phone
+    # login viewer on 127.0.0.1:8131 (tailnet: /browser via tailscale serve).
+    command:
+      - .venv/bin/python
+      - skills/playwright/scripts/browser_host.py
   playwright:
-    # Informational: install wires the real entry into config.yaml with
-    # absolute paths, the confined cwd, and PATH (scripts/playwright_tools.py
-    # `wire`). The binary is the PINNED server npm-installed under
-    # data/playwright/server — never `npx @latest`.
+    # The PINNED server npm-installed under data/playwright/server — never
+    # `npx @latest` — attached to browser-login's Chrome.
     command:
       - data/playwright/server/node_modules/.bin/playwright-mcp
-      - --browser
-      - chrome
-      - --headless
-      - --user-data-dir
-      - data/playwright/profile
+      - --cdp-endpoint
+      - http://127.0.0.1:9322
       - --output-dir
       - data/playwright/output
 skills:
@@ -22,4 +26,5 @@ skills:
 config_keys:
   - gate.approved
 secrets: []
-python_deps: []
+python_deps:
+  - websockets

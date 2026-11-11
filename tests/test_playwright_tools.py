@@ -26,9 +26,17 @@ from playwright_tools import (
     READ_TOOLS,
     SCREEN_PATTERN,
     WRITE_TOOLS,
+    Host,
     gated_name,
+    login_server_entry,
     server_entry,
     wire,
+)
+
+HOST = Host(
+    node_bin=Path("/opt/homebrew/bin"),
+    python=Path("/r/.venv/bin/python"),
+    public_base="https://mini.ts.net/browser",
 )
 
 _SKIP = (
@@ -65,7 +73,7 @@ def test_real_gate_posture(core_available: bool) -> None:
     from chief.gate import Decision, GatePolicy
 
     root = Path("/r")
-    config = wire({}, root, node_bin=Path("/n/bin"))
+    config = wire({}, root, HOST)
     gate = config["gate"]
     policy = GatePolicy(never=frozenset(gate["never"]), approved=set(gate["approved"]))
     for tool in READ_TOOLS:
@@ -74,18 +82,20 @@ def test_real_gate_posture(core_available: bool) -> None:
         assert policy.decide(gated_name(tool)) is Decision.ASK
     for tool in NEVER_TOOLS:
         assert policy.decide(gated_name(tool)) is Decision.NEVER
+    # Minting a login link is owner-facing plumbing, not an action on a site.
+    assert policy.decide("mcp_browser-login_login_link") is Decision.APPROVED
 
 
-def test_server_entry_is_absolute_pinned_and_confined() -> None:
+def test_server_entry_attaches_to_the_shared_chrome_and_is_confined() -> None:
     root = Path("/home/o/chief")
-    entry = server_entry(root, node_bin=Path("/opt/homebrew/bin"))
+    entry = server_entry(root, HOST)
     cmd = entry["command"]
     base = "/home/o/chief/data/playwright"
     assert cmd[0] == f"{base}/server/node_modules/.bin/playwright-mcp"
-    assert cmd[cmd.index("--user-data-dir") + 1] == f"{base}/profile"
+    # One Chrome, launched by the browser-login server, shared with the phone.
+    assert cmd[cmd.index("--cdp-endpoint") + 1] == "http://127.0.0.1:9322"
+    assert "--user-data-dir" not in cmd
     assert cmd[cmd.index("--output-dir") + 1] == f"{base}/output"
-    assert cmd[cmd.index("--browser") + 1] == "chrome"
-    assert "--headless" in cmd
     assert "--allow-unrestricted-file-access" not in cmd
     # File access is confined to the server's cwd, never the chief repo root.
     assert entry["cwd"] == f"{base}/workspace"
@@ -94,14 +104,28 @@ def test_server_entry_is_absolute_pinned_and_confined() -> None:
     assert PIN.count(".") == 2
 
 
+def test_login_server_entry_runs_the_installed_host_script() -> None:
+    root = Path("/home/o/chief")
+    entry = login_server_entry(root, HOST)
+    assert entry["command"] == [
+        "/r/.venv/bin/python",
+        "/home/o/chief/skills/playwright/scripts/browser_host.py",
+    ]
+    env = entry["env"]
+    assert env["BROWSER_PROFILE"] == "/home/o/chief/data/playwright/profile"
+    assert env["CDP_PORT"] == "9322"
+    assert env["VIEWER_PORT"] == "8131"
+    assert env["PUBLIC_BASE"] == "https://mini.ts.net/browser"
+
+
 def test_wire_unions_into_existing_lists_and_is_idempotent() -> None:
     existing: dict[str, Any] = {
         "gate": {"never": ["x_never"], "approved": ["notify_owner"], "announce": True},
         "typesafe": {"screen_tools": ["mcp_google-workspace_*"]},
         "mcp_servers": {"google-workspace": {"command": ["uv"]}},
     }
-    once = wire(existing, Path("/r"), node_bin=Path("/n"))
-    twice = wire(once, Path("/r"), node_bin=Path("/n"))
+    once = wire(existing, Path("/r"), HOST)
+    twice = wire(once, Path("/r"), HOST)
     assert once == twice
     assert "notify_owner" in once["gate"]["approved"]
     assert "x_never" in once["gate"]["never"]
@@ -110,7 +134,11 @@ def test_wire_unions_into_existing_lists_and_is_idempotent() -> None:
         "mcp_google-workspace_*",
         SCREEN_PATTERN,
     ]
-    assert set(once["mcp_servers"]) == {"google-workspace", "playwright"}
+    assert set(once["mcp_servers"]) == {
+        "google-workspace",
+        "playwright",
+        "browser-login",
+    }
     assert len(once["gate"]["approved"]) == len(set(once["gate"]["approved"]))
     # The input is not mutated.
     assert existing["gate"]["approved"] == ["notify_owner"]
@@ -119,7 +147,7 @@ def test_wire_unions_into_existing_lists_and_is_idempotent() -> None:
 def test_wire_leaves_default_screen_tools_alone() -> None:
     # No typesafe.screen_tools key = core's default, which already screens mcp_*.
     # Writing a list there would REPLACE that default and narrow screening.
-    config = wire({}, Path("/r"), node_bin=Path("/n"))
+    config = wire({}, Path("/r"), HOST)
     assert "typesafe" not in config
 
 
@@ -127,7 +155,7 @@ def test_wire_cli_rewrites_config_yaml(tmp_path: Path) -> None:
     from playwright_tools import main
 
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({"budget": {"cap_usd": 20}}))
-    assert main(["wire", str(tmp_path), "/n/bin"]) == 0
+    assert main(["wire", str(tmp_path), "/n/bin", "https://mini.ts.net/browser"]) == 0
     written = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert written["budget"] == {"cap_usd": 20}
-    assert "playwright" in written["mcp_servers"]
+    assert {"playwright", "browser-login"} <= set(written["mcp_servers"])
