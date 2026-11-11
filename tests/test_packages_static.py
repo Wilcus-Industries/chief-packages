@@ -102,3 +102,33 @@ def test_skill_within_package_rejects_escape(tmp_path: Path) -> None:
     assert _skill_within_package(manifest, "skills/own")
     assert not _skill_within_package(manifest, "../other/skills/x")
     assert not _skill_within_package(manifest, "/etc")
+
+
+INSTALLERS = sorted(repo_root().glob("*/install.sh"))
+
+
+@pytest.mark.parametrize(
+    "installer", INSTALLERS, ids=[p.parent.name for p in INSTALLERS]
+)
+def test_installer_reads_from_its_own_dir_and_registers_as_cloned(
+    installer: Path,
+) -> None:
+    # This repo is cloned to data/packages/, never packages/ (that is core's
+    # bundled dir), so a `packages/<name>/...` source path fails on a real
+    # install. Read from the script's own dir instead (`here=` pattern).
+    text = installer.read_text()
+    name = installer.parent.name
+    assert f"packages/{name}/" not in text.replace(f"data/packages/{name}/", ""), (
+        f"{installer}: copies from packages/{name}/ — use "
+        '$(dirname "${BASH_SOURCE[0]}") instead'
+    )
+    assert "--source bundled" not in text, (
+        f"{installer}: packages from this repo register with --source cloned"
+    )
+    # registry_apply defaults to bundled when --source is omitted, so every
+    # registration must name cloned explicitly.
+    for line in text.splitlines():
+        if "chief.registry_apply" in line and not line.lstrip().startswith("#"):
+            assert "--source cloned" in line, (
+                f"{installer}: registry_apply without --source cloned: {line.strip()}"
+            )
