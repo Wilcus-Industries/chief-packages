@@ -125,3 +125,10 @@ def test_installer_reads_from_its_own_dir_and_registers_as_cloned(
     assert "--source bundled" not in text, (
         f"{installer}: packages from this repo register with --source cloned"
     )
+    # registry_apply defaults to bundled when --source is omitted, so every
+    # registration must name cloned explicitly.
+    for line in text.splitlines():
+        if "chief.registry_apply" in line and not line.lstrip().startswith("#"):
+            assert "--source cloned" in line, (
+                f"{installer}: registry_apply without --source cloned: {line.strip()}"
+            )
