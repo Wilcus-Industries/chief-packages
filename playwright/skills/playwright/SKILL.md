@@ -15,8 +15,14 @@ it.
 the same time; you never see or touch theirs, and they never touch yours.
 Your tab closes after 10 minutes without a browser call (the next call opens
 a fresh one, still logged in), and `browser_close` closes just yours — do
-that when you're done. Opening or switching tabs is refused: navigate in your
-tab instead. If a link opens a new tab, navigate your tab to that URL.
+that when you're done. Opening or switching tabs is refused (`browser_tabs`
+only lists): navigate in your tab instead. If a link opens a new tab,
+navigate your tab to that URL. If your tab is closed under you (by hand, or
+Chrome restarted), the next call says so and a fresh tab opens — navigate
+back to where you were.
+
+`browser_navigate` takes http(s) URLs to other machines only: `javascript:`,
+`data:`, `chrome://`, `file:` and localhost/127.0.0.1 are refused.
 
 ## When to use
 
@@ -42,8 +48,8 @@ Never ask the owner for a password, and never type one yourself.
 1. Call `mcp_playwright_login_link` with the site's login URL. It opens the
    page in a new tab of chief's browser and returns a one-time link.
 2. Text the owner the link and what it's for ("Log me into Amazon: <link>").
-   They open it on their phone, see the live page, log in by hand (password,
-   2FA, captcha), and tap **Done**.
+   They open it on their phone, see the live page (with the site's host shown
+   above it), log in by hand (password, 2FA, captcha), and tap **Done**.
 3. Wait for them to say they're done, then navigate to the site and confirm
    you're logged in.
 
@@ -53,10 +59,11 @@ If a link expired or was used, mint a new one.
 
 ## The gate
 
-Looking is free: navigate, snapshot, screenshot, find, wait, console/network
-logs, tabs, minting a login link. **Acting raises an approval card** — click,
-type, fill, key press, select, drag/drop, dialogs, file upload, page JS
-(`browser_evaluate`). The owner can answer "always" per tool.
+Looking is free: navigate, snapshot, screenshot, find, wait, console logs,
+the network request list, listing tabs, minting a login link. **Acting raises
+an approval card** — click, type, fill, key press, select, drag/drop, dialogs,
+file upload, page JS (`browser_evaluate`), and reading one network request in
+full (`browser_network_request`: its headers carry the owner's credentials). The owner can answer "always" per tool.
 `browser_run_code_unsafe` is refused outright (it runs code in the server's own
 process). Say what you are about to do and why before an action, so the card
 makes sense.

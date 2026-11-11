@@ -8,7 +8,7 @@ profile** — one set of logins shared by every chief session — and gives each
 child (`@playwright/mcp`, pinned in `scripts/playwright_tools.py`) per session,
 idle tabs closed after 10 minutes, at most 4 at once, tab switching refused.
 It needs core's `session_context` MCP option (chief ≥ the release carrying
-it) to tell sessions apart. It also serves a phone **login viewer**: chief
+it) to tell sessions apart; `install.sh` refuses an older core. It also serves a phone **login viewer**: chief
 texts the owner a one-time link, the owner logs in by hand on their phone,
 and the cookies stay in chief's profile. Depends on `screening`.
 
@@ -22,16 +22,23 @@ and the cookies stay in chief's profile. Depends on `screening`.
 - Login links are single-use, 15-minute, tailnet-only. They do not ask for the
   web password (owner-approved posture). Mounting them on the tailnet changes
   the machine's `tailscale serve` config (adds `/browser`).
-- Browsing is free; acting (click, type, submit, upload, page JS) raises an
-  approval card per call until the owner answers "always" for that tool.
-  `browser_run_code_unsafe` goes on `gate.never`.
+- Browsing is free; acting (click, type, submit, upload, page JS) and reading
+  one network request in full (`browser_network_request` — its headers carry
+  credentials) raise an approval card per call until the owner answers
+  "always" for that tool. `browser_run_code_unsafe` goes on `gate.never`, and
+  the host neither lists nor runs it.
+- Navigation goes only to http(s) sites that are not this machine: the host
+  refuses `javascript:`, `data:`, `chrome://`, `file:` and loopback URLs
+  (which would run page script without a card, or reach the CDP port).
 - Navigation is not side-effect free — a GET can carry data out in a query
   string. Screening on everything the browser returns is the guard.
 
 ## Prerequisites
 
 `node` + `npm` on PATH, Google Chrome in `/Applications` (macOS), and — for
-phone links — Tailscale with `tailscale serve` already fronting chief's web UI.
+phone links — Tailscale with `tailscale serve` already fronting chief's web UI
+and **Funnel off** (install refuses to mount `/browser` while Funnel is on:
+it would put the login viewer on the public internet).
 
 ## Steps
 
@@ -45,7 +52,9 @@ phone links — Tailscale with `tailscale serve` already fronting chief's web UI
    - npm-installs the pinned server into `data/playwright/server`;
    - creates `data/playwright/{profile,output,workspace}`;
    - copies the skill and its scripts to `skills/playwright/`;
-   - runs `tailscale serve --bg --set-path /browser http://127.0.0.1:8131`;
+   - refuses if this chief core lacks `session_context`;
+   - refuses if Tailscale Funnel is on, else runs
+     `tailscale serve --bg --set-path /browser http://127.0.0.1:8131`;
    - wires `config.yaml` via `playwright_tools.py wire`: the `playwright`
      server (`session_context: true`; env: the pinned binary, profile, output
      and workspace dirs — children's file access is confined to the
@@ -56,7 +65,7 @@ phone links — Tailscale with `tailscale serve` already fronting chief's web UI
      Lists are unioned, never replaced;
    - records the install (`chief.registry_apply`).
 4. `restart`.
-5. Verify: `uv run python -m chief.pkg.cli verify playwright` is clean;
+5. Verify: `uv run chief-pkg verify playwright` is clean;
    `browser_navigate` to `https://example.com` and `browser_snapshot` shows
    "Example Domain"; `mcp_playwright_login_link` with
    `https://example.com` returns a link — text it to the owner and ask them to
@@ -64,6 +73,8 @@ phone links — Tailscale with `tailscale serve` already fronting chief's web UI
 
 ## Bumping the pin
 
-Change `PIN` in `scripts/playwright_tools.py`, list the new release's tools,
-update `PINNED_TOOLS` and classify any new tool (the package tests fail until
-you do), re-run `install.sh`, `restart`.
+Change `PIN` in `scripts/playwright_tools.py`. The package tests then fail
+until you re-record `PINNED_TOOLS` from the new release's `tools/list`, set
+`PINNED_TOOLS_VERSION` to the new pin, and classify every tool the list adds
+(read / write / never). Check any new URL-taking argument against
+`URL_ARGS` in `browser_host.py`. Re-run `install.sh`, `restart`.

@@ -6,15 +6,19 @@
    `mcp_playwright_*` from `typesafe.screen_tools` (list them with
    `uv run python skills/playwright/scripts/playwright_tools.py reads` /
    `never`). Keep every other entry.
-2. `restart`, then stop the shared Chrome (it outlives the server on purpose):
+2. Drop the owner's persisted "always allow" answers for these tools — core
+   keeps them in `data/gate_approved.json` (a sorted JSON list of tool names),
+   and a reinstall would otherwise come back with those cards pre-approved:
+   `uv run python -c "import json,pathlib; p=pathlib.Path('data/gate_approved.json'); p.exists() and p.write_text(json.dumps(sorted(n for n in json.loads(p.read_text()) if not n.startswith(('mcp_playwright_','mcp_browser-login_')))))"`.
+3. `restart`, then stop the shared Chrome (it outlives the server on purpose):
    `pkill -f -- '--remote-debugging-port=9322'`.
-3. Remove the tailnet mount if install added it:
+4. Remove the tailnet mount if install added it:
    `tailscale serve --set-path /browser off`.
-4. Ask the owner whether to keep the logged-in profile. If not, delete
+5. Ask the owner whether to keep the logged-in profile. If not, delete
    `data/playwright/` (server, profile, output, workspace); if so, delete only
    `data/playwright/server`.
-5. Delete the installed skill dir `skills/playwright/`.
-6. Deregister: `uv run python -m chief.registry_apply playwright --remove`.
-7. Delete this `UNINSTALL.md` (`data/packages/playwright/UNINSTALL.md`) — its
+6. Delete the installed skill dir `skills/playwright/`.
+7. Deregister: `uv run python -m chief.registry_apply playwright --remove`.
+8. Delete this `UNINSTALL.md` (`data/packages/playwright/UNINSTALL.md`) — its
    absence signals the uninstall completed.
-8. `restart` to bring the change live.
+9. `restart` to bring the change live.
